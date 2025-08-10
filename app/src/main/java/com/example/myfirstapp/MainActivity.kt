@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar: androidx.appcompat.widget.Toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
-        supportActionBar?.title = getString(R.string.main_activity_title)
+//        supportActionBar?.title = getString(R.string.main_activity_title)
 
         etHost = findViewById(R.id.etHost)
         spProtocol = findViewById(R.id.spProtocol)
