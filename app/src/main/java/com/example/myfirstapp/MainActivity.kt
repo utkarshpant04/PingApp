@@ -1,6 +1,11 @@
 package com.example.myfirstapp
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Bundle
+import android.os.IBinder
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.*
@@ -8,11 +13,6 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
-import java.io.BufferedReader
-import java.io.IOException
-import java.io.InputStreamReader
-import java.net.*
-import kotlin.system.measureTimeMillis
 
 class MainActivity : AppCompatActivity() {
 
@@ -29,9 +29,37 @@ class MainActivity : AppCompatActivity() {
     private var tcpPort = 80
     private var udpPort = 5001
 
-    private var pingJob: Job? = null
-    private var packetsSent = 0
-    private var packetsReceived = 0
+    private var pingService: PingService? = null
+    private var isServiceBound = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as PingService.PingBinder
+            pingService = binder.getService()
+            isServiceBound = true
+
+            // Set up log observer
+            pingService?.setLogCallback { message ->
+                runOnUiThread {
+                    tvLog.append("$message\n")
+                    tvLog.layout?.let { layout ->
+                        val scrollAmount = layout.getLineTop(tvLog.lineCount)
+                        if (scrollAmount > tvLog.height) {
+                            tvLog.scrollTo(0, scrollAmount - tvLog.height)
+                        }
+                    }
+                }
+            }
+
+            // Update UI based on service state
+            updateUI()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            pingService = null
+            isServiceBound = false
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +81,23 @@ class MainActivity : AppCompatActivity() {
 
         btnStart.setOnClickListener { startPinging() }
         btnStop.setOnClickListener { stopPinging() }
+
+        // Bind to the service
+        val serviceIntent = Intent(this, PingService::class.java)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isServiceBound) {
+            unbindService(serviceConnection)
+            isServiceBound = false
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateUI()
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -90,21 +135,12 @@ class MainActivity : AppCompatActivity() {
                 timeout = etTimeout.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: timeout
                 tcpPort = etTcpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: tcpPort
                 udpPort = etUdpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: udpPort
+
+                // Update service settings
+                pingService?.updateSettings(packetSize, timeout, tcpPort, udpPort)
             }
             .setNegativeButton("Cancel", null)
             .show()
-    }
-
-    private fun log(message: String) {
-        runOnUiThread {
-            tvLog.append("$message\n")
-            tvLog.layout?.let { layout ->
-                val scrollAmount = layout.getLineTop(tvLog.lineCount)
-                if (scrollAmount > tvLog.height) {
-                    tvLog.scrollTo(0, scrollAmount - tvLog.height)
-                }
-            }
-        }
     }
 
     private fun startPinging() {
@@ -117,88 +153,30 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        packetsSent = 0
-        packetsReceived = 0
-        tvLog.text = ""
-
-        pingJob = lifecycleScope.launch(Dispatchers.IO) {
-            while (isActive) {
-                packetsSent++
-                val success: Boolean
-                val rtt = measureTimeMillis {
-                    success = when (protocol) {
-                        "ICMP" -> icmpPingCmd(host) // more reliable
-                        "TCP" -> tcpPing(host, tcpPort)
-                        "UDP" -> udpPing(host, udpPort, timeout)
-                        else -> false
-                    }
-                }
-                if (success) {
-                    packetsReceived++
-                    log("Reply from $host: time=${rtt}ms, packets: $packetsReceived/$packetsSent")
-                } else {
-                    log("Request timed out. packets: $packetsReceived/$packetsSent")
-                }
-                delay(interval)
-            }
+        if (!isServiceBound || pingService == null) {
+            Toast.makeText(this, "Service not ready", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        tvLog.text = ""
+        pingService?.startPinging(host, protocol, interval, packetSize, timeout, tcpPort, udpPort)
+        updateUI()
     }
 
     private fun stopPinging() {
-        lifecycleScope.launch {
-            pingJob?.cancelAndJoin() // wait for job to finish
-            val loss = if (packetsSent > 0)
-                ((packetsSent - packetsReceived) * 100) / packetsSent
-            else 0
-            log("Ping stopped. Packet loss: $loss%")
-        }
+        pingService?.stopPinging()
+        updateUI()
     }
 
-    /** ICMP ping via system ping command for Android reliability */
-    private fun icmpPingCmd(host: String): Boolean {
-        return try {
-            val process = ProcessBuilder()
-                .command("ping", "-c", "1", "-W", (timeout / 1000).toString(), host)
-                .redirectErrorStream(true)
-                .start()
+    private fun updateUI() {
+        val isRunning = pingService?.isRunning() ?: false
+        btnStart.isEnabled = !isRunning
+        btnStop.isEnabled = isRunning
 
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val output = reader.readText()
-            val exitCode = process.waitFor()
-            exitCode == 0 && output.contains("bytes from")
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun tcpPing(host: String, port: Int): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), timeout)
-                true
-            }
-        } catch (e: IOException) {
-            false
-        }
-    }
-
-    private fun udpPing(host: String, port: Int, timeout: Int): Boolean {
-        return try {
-            DatagramSocket().use { socket ->
-                socket.soTimeout = timeout
-                val sendData = ByteArray(packetSize) { 'A'.code.toByte() }
-                val packet = DatagramPacket(sendData, sendData.size, InetAddress.getByName(host), port)
-                socket.send(packet)
-
-                val buffer = ByteArray(1024)
-                val response = DatagramPacket(buffer, buffer.size)
-                socket.receive(response)
-                true
-            }
-        } catch (e: SocketTimeoutException) {
-            false
-        } catch (e: IOException) {
-            false
+        if (isRunning) {
+            btnStart.text = "Running..."
+        } else {
+            btnStart.text = "Start"
         }
     }
 }
