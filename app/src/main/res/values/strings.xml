@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App name that appears in Android system -->
+    <string name="app_name">Ping App</string>
+
+    <!-- Activity and UI strings -->
+    <string name="main_activity_title">Ping App</string>
+    <string name="start_ping">Start</string>
+    <string name="stop_ping">Stop</string>
+    <string name="running">Running...</string>
+    <string name="settings">Settings</string>
+
+    <!-- Input hints -->
+    <string name="host_hint">Enter host or IP address</string>
+    <string name="interval_hint">Interval (ms)</string>
+    <string name="packet_size_hint">Packet Size (bytes)</string>
+    <string name="timeout_hint">Timeout (ms)</string>
+    <string name="tcp_port_hint">TCP Port</string>
+    <string name="udp_port_hint">UDP Port</string>
+
+    <!-- Error messages -->
+    <string name="enter_host_error">Enter a host</string>
+    <string name="service_not_ready">Service not ready</string>
+
+    <!-- Dialog strings -->
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="settings_title">Settings</string>
+
+    <!-- Service strings -->
+    <string name="ping_service_channel">Ping Service Channel</string>
+    <string name="starting_ping">Starting ping to %s</string>
+    <string name="initializing_ping">Initializing %s ping...</string>
+    <string name="pinging_host">Pinging %s (%s)</string>
+</resources>

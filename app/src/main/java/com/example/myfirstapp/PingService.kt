@@ -26,6 +26,8 @@ class PingService : Service() {
     private var packetsReceived = 0
     private var currentHost = ""
     private var currentProtocol = ""
+    private var totalBytesTransferred = 0L
+    private var startTime = 0L
 
     // Settings
     private var packetSize = 32
@@ -63,7 +65,7 @@ class PingService : Service() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
-                "Ping Service Channel",
+                getString(R.string.ping_service_channel),
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
@@ -94,9 +96,11 @@ class PingService : Service() {
             ((packetsSent - packetsReceived) * 100) / packetsSent
         } else 0
 
+        val bandwidth = calculateBandwidth()
+
         val notification = createNotification(
-            "Pinging $currentHost ($currentProtocol)",
-            "Packets: $packetsReceived/$packetsSent, Loss: $loss%"
+            getString(R.string.pinging_host, currentHost, currentProtocol),
+            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -124,6 +128,8 @@ class PingService : Service() {
         currentProtocol = protocol
         packetsSent = 0
         packetsReceived = 0
+        totalBytesTransferred = 0L
+        startTime = System.currentTimeMillis()
 
         this.packetSize = packetSize
         this.timeout = timeout
@@ -132,8 +138,8 @@ class PingService : Service() {
 
         // Start foreground service
         val notification = createNotification(
-            "Starting ping to $host",
-            "Initializing $protocol ping..."
+            getString(R.string.starting_ping, host),
+            getString(R.string.initializing_ping, protocol)
         )
         startForeground(NOTIFICATION_ID, notification)
 
@@ -152,9 +158,25 @@ class PingService : Service() {
 
                 if (success) {
                     packetsReceived++
-                    log("Reply from $host: time=${rtt}ms, packets: $packetsReceived/$packetsSent")
+                    // Count bytes for bandwidth calculation (approximate)
+                    totalBytesTransferred += when (protocol) {
+                        "ICMP" -> packetSize.toLong() * 2 // sent + received
+                        "TCP" -> 64L // TCP handshake overhead
+                        "UDP" -> packetSize.toLong() * 2 // sent + received if response
+                        else -> 0L
+                    }
+                }
+
+                val loss = if (packetsSent > 0) {
+                    ((packetsSent - packetsReceived) * 100) / packetsSent
+                } else 0
+
+                val bandwidth = calculateBandwidth()
+
+                if (success) {
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
                 } else {
-                    log("Request timed out. packets: $packetsReceived/$packetsSent")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
                 }
 
                 // Update notification every 5 pings or on first ping
@@ -170,10 +192,14 @@ class PingService : Service() {
     fun stopPinging() {
         serviceScope.launch {
             pingJob?.cancelAndJoin()
+            pingJob = null // Clear the job reference
             val loss = if (packetsSent > 0) {
                 ((packetsSent - packetsReceived) * 100) / packetsSent
             } else 0
-            log("Ping stopped. Packet loss: $loss%")
+
+            val bandwidth = calculateBandwidth()
+
+            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, Avg BW: ${formatBandwidth(bandwidth)}")
 
             // Stop foreground service
             stopForeground(true)
@@ -184,6 +210,24 @@ class PingService : Service() {
 
     private fun log(message: String) {
         logCallback?.invoke(message)
+    }
+
+    private fun calculateBandwidth(): Double {
+        val elapsedTimeSeconds = (System.currentTimeMillis() - startTime) / 1000.0
+        return if (elapsedTimeSeconds > 0) {
+            (totalBytesTransferred * 8) / elapsedTimeSeconds // bits per second
+        } else {
+            0.0
+        }
+    }
+
+    private fun formatBandwidth(bps: Double): String {
+        return when {
+            bps >= 1_000_000_000 -> "%.2f Gbps".format(bps / 1_000_000_000)
+            bps >= 1_000_000 -> "%.2f Mbps".format(bps / 1_000_000)
+            bps >= 1_000 -> "%.2f Kbps".format(bps / 1_000)
+            else -> "%.0f bps".format(bps)
+        }
     }
 
     /** ICMP ping via system ping command for Android reliability */

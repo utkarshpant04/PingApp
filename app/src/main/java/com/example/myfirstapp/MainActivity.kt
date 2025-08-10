@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar: androidx.appcompat.widget.Toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
-        supportActionBar?.title = "Ping App"
+        supportActionBar?.title = getString(R.string.main_activity_title)
 
         etHost = findViewById(R.id.etHost)
         spProtocol = findViewById(R.id.spProtocol)
@@ -128,9 +128,9 @@ class MainActivity : AppCompatActivity() {
         etUdpPort.setText(udpPort.toString())
 
         AlertDialog.Builder(this)
-            .setTitle("Settings")
+            .setTitle(getString(R.string.settings_title))
             .setView(dialogView)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(getString(R.string.save)) { _, _ ->
                 packetSize = etPacketSize.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: packetSize
                 timeout = etTimeout.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: timeout
                 tcpPort = etTcpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: tcpPort
@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
                 // Update service settings
                 pingService?.updateSettings(packetSize, timeout, tcpPort, udpPort)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(getString(R.string.cancel), null)
             .show()
     }
 
@@ -149,12 +149,12 @@ class MainActivity : AppCompatActivity() {
         val protocol = spProtocol.selectedItem.toString()
 
         if (host.isEmpty()) {
-            Toast.makeText(this, "Enter a host", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.enter_host_error), Toast.LENGTH_SHORT).show()
             return
         }
 
         if (!isServiceBound || pingService == null) {
-            Toast.makeText(this, "Service not ready", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.service_not_ready), Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -164,19 +164,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopPinging() {
-        pingService?.stopPinging()
-        updateUI()
+        lifecycleScope.launch {
+            pingService?.stopPinging()
+            // Wait a moment for the service to fully stop
+            delay(100)
+            updateUI()
+        }
     }
 
     private fun updateUI() {
-        val isRunning = pingService?.isRunning() ?: false
-        btnStart.isEnabled = !isRunning
-        btnStop.isEnabled = isRunning
+        lifecycleScope.launch {
+            // Small delay to ensure service state is updated
+            delay(50)
+            val isRunning = pingService?.isRunning() ?: false
+            runOnUiThread {
+                btnStart.isEnabled = !isRunning
+                btnStop.isEnabled = isRunning
 
-        if (isRunning) {
-            btnStart.text = "Running..."
-        } else {
-            btnStart.text = "Start"
+                if (isRunning) {
+                    btnStart.text = getString(R.string.running)
+                } else {
+                    btnStart.text = getString(R.string.start_ping)
+                }
+            }
         }
     }
 }
