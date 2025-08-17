@@ -3,6 +3,7 @@ package com.example.myfirstapp
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.location.Location
 import android.os.Binder
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -34,6 +35,9 @@ class PingService : Service() {
     private var timeout = 1000
     private var tcpPort = 80
     private var udpPort = 5001
+
+    // Location
+    private var currentLocation: Location? = null
 
     // Callback for logging
     private var logCallback: ((String) -> Unit)? = null
@@ -97,10 +101,11 @@ class PingService : Service() {
         } else 0
 
         val bandwidth = calculateBandwidth()
+        val location = getLocationString()
 
         val notification = createNotification(
             getString(R.string.pinging_host, currentHost, currentProtocol),
-            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
+            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}, Loc: $location"
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -116,6 +121,16 @@ class PingService : Service() {
         this.timeout = timeout
         this.tcpPort = tcpPort
         this.udpPort = udpPort
+    }
+
+    fun updateLocation(location: Location?) {
+        currentLocation = location
+    }
+
+    private fun getLocationString(): String {
+        return currentLocation?.let {
+            "%.6f,%.6f".format(it.latitude, it.longitude)
+        } ?: "N/A"
     }
 
     fun startPinging(host: String, protocol: String, interval: Long,
@@ -172,11 +187,12 @@ class PingService : Service() {
                 } else 0
 
                 val bandwidth = calculateBandwidth()
+                val location = getLocationString()
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}, Loc: $location")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}, Loc: $location")
                 }
 
                 // Update notification every 5 pings or on first ping
@@ -198,8 +214,9 @@ class PingService : Service() {
             } else 0
 
             val bandwidth = calculateBandwidth()
+            val location = getLocationString()
 
-            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, Avg BW: ${formatBandwidth(bandwidth)}")
+            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, Avg BW: ${formatBandwidth(bandwidth)}, Loc: $location")
 
             // Stop foreground service
             stopForeground(true)

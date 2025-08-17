@@ -1,9 +1,14 @@
 package com.example.myfirstapp
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Menu
@@ -11,10 +16,12 @@ import android.view.MenuItem
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), LocationListener {
 
     private lateinit var etHost: EditText
     private lateinit var spProtocol: Spinner
@@ -31,6 +38,11 @@ class MainActivity : AppCompatActivity() {
 
     private var pingService: PingService? = null
     private var isServiceBound = false
+
+    // Location related
+    private lateinit var locationManager: LocationManager
+    private var currentLocation: Location? = null
+    private val LOCATION_PERMISSION_REQUEST_CODE = 1001
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -67,7 +79,6 @@ class MainActivity : AppCompatActivity() {
 
         val toolbar: androidx.appcompat.widget.Toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
-//        supportActionBar?.title = getString(R.string.main_activity_title)
 
         etHost = findViewById(R.id.etHost)
         spProtocol = findViewById(R.id.spProtocol)
@@ -82,13 +93,110 @@ class MainActivity : AppCompatActivity() {
         btnStart.setOnClickListener { startPinging() }
         btnStop.setOnClickListener { stopPinging() }
 
+        // Initialize location manager
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+        // Request location permissions if not granted
+        requestLocationPermissions()
+
         // Bind to the service
         val serviceIntent = Intent(this, PingService::class.java)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
+    private fun requestLocationPermissions() {
+        val permissions = arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+
+        val permissionsToRequest = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                permissionsToRequest.toTypedArray(),
+                LOCATION_PERMISSION_REQUEST_CODE
+            )
+        } else {
+            startLocationUpdates()
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        when (requestCode) {
+            LOCATION_PERMISSION_REQUEST_CODE -> {
+                if (grantResults.isNotEmpty() && grantResults.any { it == PackageManager.PERMISSION_GRANTED }) {
+                    startLocationUpdates()
+                } else {
+                    Toast.makeText(this, "Location permission denied. Location will show as N/A", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun startLocationUpdates() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+
+            try {
+                // Try GPS first, then network
+                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        10000, // 10 seconds
+                        10f,   // 10 meters
+                        this
+                    )
+                    // Get last known location
+                    currentLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                }
+
+                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        10000, // 10 seconds
+                        10f,   // 10 meters
+                        this
+                    )
+                    // If no GPS location, try network
+                    if (currentLocation == null) {
+                        currentLocation = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                    }
+                }
+            } catch (e: SecurityException) {
+                // Handle security exception
+            }
+        }
+    }
+
+    override fun onLocationChanged(location: Location) {
+        currentLocation = location
+        // Optionally update the service with new location
+        pingService?.updateLocation(location)
+    }
+
+    private fun getLocationString(): String {
+        return currentLocation?.let {
+            "Lat: %.6f, Lon: %.6f".format(it.latitude, it.longitude)
+        } ?: "N/A"
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        try {
+            locationManager.removeUpdates(this)
+        } catch (e: SecurityException) {
+            // Handle security exception
+        }
+
         if (isServiceBound) {
             unbindService(serviceConnection)
             isServiceBound = false
@@ -159,6 +267,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         tvLog.text = ""
+
+        // Pass current location to service
+        pingService?.updateLocation(currentLocation)
         pingService?.startPinging(host, protocol, interval, packetSize, timeout, tcpPort, udpPort)
         updateUI()
     }
@@ -189,4 +300,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    // Required LocationListener methods (can be empty)
+    override fun onProviderEnabled(provider: String) {}
+    override fun onProviderDisabled(provider: String) {}
+    @Deprecated("Deprecated in API level 29")
+    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
 }
