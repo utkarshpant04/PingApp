@@ -26,8 +26,15 @@ class PingService : Service() {
     private var packetsReceived = 0
     private var currentHost = ""
     private var currentProtocol = ""
+    private var currentLocation = "N/A"
     private var totalBytesTransferred = 0L
     private var startTime = 0L
+    private var sessionId = ""
+    private var pingResults = mutableListOf<PingResult>()
+    private var minRtt = Double.MAX_VALUE
+    private var maxRtt = 0.0
+    private var totalRtt = 0.0
+    private var startLocation = "N/A"
 
     // Settings
     private var packetSize = 32
@@ -37,6 +44,8 @@ class PingService : Service() {
 
     // Callback for logging
     private var logCallback: ((String) -> Unit)? = null
+    // API client for server communication
+    private var apiClient: RestApiClient? = null
 
     inner class PingBinder : Binder() {
         fun getService(): PingService = this@PingService
@@ -45,6 +54,8 @@ class PingService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // Initialize API client for server communication
+        apiClient = RestApiClient(this)
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -119,17 +130,25 @@ class PingService : Service() {
     }
 
     fun startPinging(host: String, protocol: String, interval: Long,
-                     packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int) {
+                     packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int, location: String) {
         if (pingJob?.isActive == true) {
             stopPinging()
         }
 
+        // Initialize session data
         currentHost = host
         currentProtocol = protocol
+        currentLocation = location
+        startLocation = location
         packetsSent = 0
         packetsReceived = 0
         totalBytesTransferred = 0L
         startTime = System.currentTimeMillis()
+        sessionId = "session_${System.currentTimeMillis()}_${(1000..9999).random()}"
+        pingResults.clear()
+        minRtt = Double.MAX_VALUE
+        maxRtt = 0.0
+        totalRtt = 0.0
 
         this.packetSize = packetSize
         this.timeout = timeout
@@ -143,9 +162,14 @@ class PingService : Service() {
         )
         startForeground(NOTIFICATION_ID, notification)
 
+        // Log initial location
+        log("Starting ping to $host ($protocol) - Session: $sessionId - Location: $location")
+
         pingJob = serviceScope.launch {
+            var sequenceNumber = 0
             while (isActive) {
                 packetsSent++
+                sequenceNumber++
                 val success: Boolean
                 val rtt = measureTimeMillis {
                     success = when (protocol) {
@@ -156,8 +180,24 @@ class PingService : Service() {
                     }
                 }
 
+                // Record ping result
+                val pingResult = PingResult(
+                    timestamp = System.currentTimeMillis().toString(),
+                    sequence = sequenceNumber,
+                    success = success,
+                    rttMs = rtt.toDouble(),
+                    location = location,
+                    errorMessage = if (!success) "Request timed out" else ""
+                )
+                pingResults.add(pingResult)
+
                 if (success) {
                     packetsReceived++
+                    // Update RTT statistics
+                    totalRtt += rtt.toDouble()
+                    if (rtt.toDouble() < minRtt) minRtt = rtt.toDouble()
+                    if (rtt.toDouble() > maxRtt) maxRtt = rtt.toDouble()
+
                     // Count bytes for bandwidth calculation (approximate)
                     totalBytesTransferred += when (protocol) {
                         "ICMP" -> packetSize.toLong() * 2 // sent + received
@@ -174,9 +214,9 @@ class PingService : Service() {
                 val bandwidth = calculateBandwidth()
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Location: $location")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Location: $location")
                 }
 
                 // Update notification every 5 pings or on first ping
@@ -193,13 +233,63 @@ class PingService : Service() {
         serviceScope.launch {
             pingJob?.cancelAndJoin()
             pingJob = null // Clear the job reference
-            val loss = if (packetsSent > 0) {
-                ((packetsSent - packetsReceived) * 100) / packetsSent
-            } else 0
 
+            val endTime = System.currentTimeMillis()
+            val duration = (endTime - startTime) / 1000 // seconds
+
+            val loss = if (packetsSent > 0) {
+                ((packetsSent - packetsReceived) * 100.0) / packetsSent
+            } else 0.0
+
+            val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
             val bandwidth = calculateBandwidth()
 
-            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, Avg BW: ${formatBandwidth(bandwidth)}")
+            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $currentLocation")
+
+            // Prepare session data for server upload
+            val sessionData = PingSessionData(
+                sessionId = sessionId,
+                host = currentHost,
+                protocol = currentProtocol,
+                startTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(startTime)),
+                endTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(endTime)),
+                durationSeconds = duration,
+                packetsSent = packetsSent,
+                packetsReceived = packetsReceived,
+                packetLossPercent = loss,
+                avgRttMs = avgRtt,
+                minRttMs = if (minRtt == Double.MAX_VALUE) 0.0 else minRtt,
+                maxRttMs = maxRtt,
+                totalBytes = totalBytesTransferred,
+                avgBandwidthBps = bandwidth,
+                startLocation = startLocation,
+                endLocation = currentLocation,
+                settings = PingSettings(
+                    packetSize = packetSize,
+                    timeout = timeout,
+                    interval = 1000L, // Default interval
+                    tcpPort = tcpPort,
+                    udpPort = udpPort
+                ),
+                pingResults = pingResults.toList()
+            )
+
+            // Upload session data to server
+            try {
+                apiClient?.let { client ->
+                    val result = client.uploadPingSession(sessionData)
+                    when (result) {
+                        is ApiResponse.Success -> {
+                            log("Session data uploaded to server successfully")
+                        }
+                        is ApiResponse.Error -> {
+                            log("Failed to upload session data: ${result.message}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                log("Error uploading session data: ${e.message}")
+            }
 
             // Stop foreground service
             stopForeground(true)
@@ -207,6 +297,8 @@ class PingService : Service() {
     }
 
     fun isRunning(): Boolean = pingJob?.isActive == true
+
+    fun getCurrentLocation(): String = currentLocation
 
     private fun log(message: String) {
         logCallback?.invoke(message)

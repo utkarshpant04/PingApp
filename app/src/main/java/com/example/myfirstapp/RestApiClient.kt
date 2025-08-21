@@ -1,4 +1,4 @@
-// Updated RestApiClient.kt with data collection and upload
+// Updated RestApiClient.kt with location data collection and upload
 
 package com.example.myfirstapp
 
@@ -63,18 +63,19 @@ class RestApiClient(private val context: Context) {
     /**
      * Connect to server with device information and get client ID
      */
-    suspend fun connectToServer(): ApiResponse {
+    suspend fun connectToServer(location: String = "N/A"): ApiResponse {
         return withContext(Dispatchers.IO) {
             try {
                 val url = URL("$SERVER_BASE_URL/connect")
                 val connection = createConnection(url, "POST")
 
-                // Prepare device info JSON
+                // Prepare device info JSON with location
                 val deviceInfo = JSONObject().apply {
                     put("device_id", deviceId)
                     put("app_version", "1.0.0")
                     put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("android_version", Build.VERSION.RELEASE)
+                    put("location", location)
                     put("timestamp", System.currentTimeMillis())
                 }
 
@@ -108,9 +109,9 @@ class RestApiClient(private val context: Context) {
     }
 
     /**
-     * Send heartbeat to server
+     * Send heartbeat to server with location
      */
-    suspend fun sendHeartbeat(appStatus: String = "running"): ApiResponse {
+    suspend fun sendHeartbeat(appStatus: String = "running", location: String = "N/A"): ApiResponse {
         return withContext(Dispatchers.IO) {
             try {
                 val url = URL("$SERVER_BASE_URL/heartbeat")
@@ -120,6 +121,7 @@ class RestApiClient(private val context: Context) {
                     put("device_id", deviceId)
                     put("client_id", clientId)
                     put("app_status", appStatus)
+                    put("location", location)
                     put("timestamp", System.currentTimeMillis())
                 }
 
@@ -150,7 +152,7 @@ class RestApiClient(private val context: Context) {
     }
 
     /**
-     * Upload ping session data to server
+     * Upload ping session data to server with location information
      */
     suspend fun uploadPingSession(sessionData: PingSessionData): ApiResponse {
         return withContext(Dispatchers.IO) {
@@ -158,7 +160,7 @@ class RestApiClient(private val context: Context) {
                 val url = URL("$SERVER_BASE_URL/upload-session")
                 val connection = createConnection(url, "POST")
 
-                // Prepare session data JSON
+                // Prepare session data JSON with location
                 val sessionJson = JSONObject().apply {
                     put("session_id", sessionData.sessionId)
                     put("client_id", clientId ?: "unknown")
@@ -175,6 +177,8 @@ class RestApiClient(private val context: Context) {
                     put("max_rtt_ms", sessionData.maxRttMs)
                     put("total_bytes", sessionData.totalBytes)
                     put("avg_bandwidth_bps", sessionData.avgBandwidthBps)
+                    put("start_location", sessionData.startLocation)
+                    put("end_location", sessionData.endLocation)
 
                     // Settings used
                     val settingsJson = JSONObject().apply {
@@ -195,6 +199,7 @@ class RestApiClient(private val context: Context) {
                                 put("sequence", result.sequence)
                                 put("success", result.success)
                                 put("rtt_ms", result.rttMs)
+                                put("location", result.location)
                                 put("error_message", result.errorMessage)
                             }
                             resultsArray.put(resultJson)
@@ -257,7 +262,7 @@ class RestApiClient(private val context: Context) {
 }
 
 /**
- * Data classes for ping session information
+ * Data classes for ping session information with location data
  */
 data class PingSessionData(
     val sessionId: String,
@@ -274,6 +279,8 @@ data class PingSessionData(
     val maxRttMs: Double = 0.0,
     val totalBytes: Long = 0,
     val avgBandwidthBps: Double = 0.0,
+    val startLocation: String = "N/A",
+    val endLocation: String = "N/A",
     val settings: PingSettings,
     val pingResults: List<PingResult> = emptyList()
 )
@@ -291,6 +298,7 @@ data class PingResult(
     val sequence: Int,
     val success: Boolean,
     val rttMs: Double,
+    val location: String = "N/A",
     val errorMessage: String = ""
 )
 
