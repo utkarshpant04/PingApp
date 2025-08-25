@@ -23,19 +23,18 @@ import kotlinx.coroutines.*
 
 class MainActivity : AppCompatActivity(), LocationListener {
 
-    private lateinit var etHost: EditText
-    private lateinit var spProtocol: Spinner
-    private lateinit var etInterval: EditText
-    private lateinit var btnStart: Button
-    private lateinit var btnStop: Button
+    private lateinit var btnConnect: Button
+    private lateinit var btnDisconnect: Button
+    private lateinit var tvStatus: TextView
     private lateinit var tvLog: TextView
+    private lateinit var tvServerInstructions: TextView
 
     // Location components
     private lateinit var locationManager: LocationManager
     private var currentLocation: Location? = null
     private val LOCATION_PERMISSION_REQUEST_CODE = 1001
 
-    // Configurable defaults
+    // Configurable defaults for ping settings
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
@@ -43,6 +42,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     private var pingService: PingService? = null
     private var isServiceBound = false
+    private var isConnectedToServer = false
 
     // REST API client for server communication
     private lateinit var apiClient: RestApiClient
@@ -83,18 +83,14 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val toolbar: androidx.appcompat.widget.Toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
 
-        etHost = findViewById(R.id.etHost)
-        spProtocol = findViewById(R.id.spProtocol)
-        etInterval = findViewById(R.id.etInterval)
-        btnStart = findViewById(R.id.btnStart)
-        btnStop = findViewById(R.id.btnStop)
+        btnConnect = findViewById(R.id.btnConnect)
+        btnDisconnect = findViewById(R.id.btnDisconnect)
+        tvStatus = findViewById(R.id.tvStatus)
         tvLog = findViewById(R.id.tvLog)
+        tvServerInstructions = findViewById(R.id.tvServerInstructions)
 
-        val protocols = arrayOf("ICMP", "TCP", "UDP")
-        spProtocol.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, protocols)
-
-        btnStart.setOnClickListener { startPinging() }
-        btnStop.setOnClickListener { stopPinging() }
+        btnConnect.setOnClickListener { connectToServerAndStartHeartbeat() }
+        btnDisconnect.setOnClickListener { disconnectFromServer() }
 
         // Initialize location manager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -105,12 +101,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
         // Request location permissions if not granted
         requestLocationPermissions()
 
-        // Connect to server
-        connectToServer()
-
         // Bind to the service
         val serviceIntent = Intent(this, PingService::class.java)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+
+        updateUI()
     }
 
     private fun requestLocationPermissions() {
@@ -195,53 +190,126 @@ class MainActivity : AppCompatActivity(), LocationListener {
         } ?: "N/A"
     }
 
-    private fun connectToServer() {
+    private fun connectToServerAndStartHeartbeat() {
+        if (isConnectedToServer) return
+
         lifecycleScope.launch {
             try {
                 // First test server connectivity
+                tvStatus.text = "Connecting to server..."
                 val pingResult = apiClient.pingServer()
+
                 when (pingResult) {
                     is ApiResponse.Success -> {
                         // Server is reachable, now connect with device info
                         val location = getCurrentLocationString()
                         val connectResult = apiClient.connectToServer(location)
+
                         when (connectResult) {
                             is ApiResponse.Success -> {
+                                isConnectedToServer = true
+                                tvStatus.text = "Connected to server"
                                 Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
-                                // Start periodic heartbeats
-                                startHeartbeats()
+
+                                // Clear log and show connection info
+                                tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
+
+                                // Start service for server-controlled operations
+                                pingService?.startServerControlledMode()
+
+                                // Start 5-minute heartbeat with server instruction checking
+                                startProperHeartbeat()
+                                updateUI()
                             }
                             is ApiResponse.Error -> {
+                                tvStatus.text = "Connection failed"
                                 Toast.makeText(this@MainActivity, "Server connection failed: ${connectResult.message}", Toast.LENGTH_LONG).show()
                             }
                         }
                     }
                     is ApiResponse.Error -> {
+                        tvStatus.text = "Server unreachable"
                         Toast.makeText(this@MainActivity, "Server unreachable: ${pingResult.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
+                tvStatus.text = "Connection error"
                 Toast.makeText(this@MainActivity, "Connection error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
 
-    private fun startHeartbeats() {
-        lifecycleScope.launch {
-            while (true) {
-                try {
-                    val location = getCurrentLocationString()
-                    apiClient.sendHeartbeat("running", location)
-                } catch (e: Exception) {
-                    // Silently continue if heartbeat fails
+    /**
+     * Start proper 5-minute heartbeat using RestApiClient's built-in system
+     */
+    private fun startProperHeartbeat() {
+        // Use the RestApiClient's proper 5-minute heartbeat system
+        apiClient.startHeartbeat(
+            scope = lifecycleScope,
+            location = getCurrentLocationString()
+        ) { instruction ->
+            // Handle server instructions received via heartbeat
+            runOnUiThread {
+                if (instruction.sendPing) {
+                    tvServerInstructions.text = "Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
+                    tvLog.append("💓 Heartbeat received server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s\n")
+
+                    // Execute ping as instructed by server
+                    pingService?.executePingInstruction(
+                        instruction.host,
+                        instruction.protocol,
+                        instruction.intervalMs,
+                        instruction.durationSeconds,
+                        packetSize,
+                        timeout,
+                        tcpPort,
+                        udpPort,
+                        getCurrentLocationString()
+                    )
+                } else {
+                    tvServerInstructions.text = "Server instruction: Wait for further instructions"
+                    tvLog.append("💓 Heartbeat sent - waiting for instructions\n")
                 }
-                delay(300000) // Send heartbeat every 5 minutes
             }
+        }
+    }
+
+    private fun disconnectFromServer() {
+        lifecycleScope.launch {
+            isConnectedToServer = false
+            tvStatus.text = "Disconnected"
+            tvServerInstructions.text = "Not connected to server"
+
+            // Stop the proper 5-minute heartbeat
+            apiClient.stopHeartbeat()
+
+            // Stop service operations
+            pingService?.stopServerControlledMode()
+
+            // Send final heartbeat to notify server of disconnection
+            try {
+                val location = getCurrentLocationString()
+                apiClient.sendHeartbeatAndCheckInstructions("disconnected", location)
+                tvLog.append("Sent disconnection notification to server\n")
+            } catch (e: Exception) {
+                tvLog.append("Failed to notify server of disconnection: ${e.message}\n")
+            }
+
+            tvLog.append("Disconnected from server - heartbeat stopped\n")
+            Toast.makeText(this@MainActivity, "Disconnected from server", Toast.LENGTH_SHORT).show()
+            updateUI()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+
+        // Disconnect from server and stop heartbeat
+        if (isConnectedToServer) {
+            isConnectedToServer = false
+            apiClient.stopHeartbeat()
+        }
+
         if (isServiceBound) {
             unbindService(serviceConnection)
             isServiceBound = false
@@ -303,49 +371,24 @@ class MainActivity : AppCompatActivity(), LocationListener {
             .show()
     }
 
-    private fun startPinging() {
-        val host = etHost.text.toString().trim()
-        val interval = etInterval.text.toString().toLongOrNull() ?: 1000L
-        val protocol = spProtocol.selectedItem.toString()
-        val location = getCurrentLocationString()
-
-        if (host.isEmpty()) {
-            Toast.makeText(this, getString(R.string.enter_host_error), Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (!isServiceBound || pingService == null) {
-            Toast.makeText(this, getString(R.string.service_not_ready), Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        tvLog.text = ""
-        pingService?.startPinging(host, protocol, interval, packetSize, timeout, tcpPort, udpPort, location)
-        updateUI()
-    }
-
-    private fun stopPinging() {
-        lifecycleScope.launch {
-            pingService?.stopPinging()
-            // Wait a moment for the service to fully stop
-            delay(100)
-            updateUI()
-        }
-    }
-
     private fun updateUI() {
         lifecycleScope.launch {
             // Small delay to ensure service state is updated
             delay(50)
-            val isRunning = pingService?.isRunning() ?: false
-            runOnUiThread {
-                btnStart.isEnabled = !isRunning
-                btnStop.isEnabled = isRunning
+            val isPingingActive = pingService?.isExecutingServerInstruction() ?: false
 
-                if (isRunning) {
-                    btnStart.text = getString(R.string.running)
+            runOnUiThread {
+                btnConnect.isEnabled = !isConnectedToServer && !isPingingActive
+                btnDisconnect.isEnabled = isConnectedToServer
+
+                if (isConnectedToServer && !isPingingActive) {
+                    val heartbeatStatus = if (apiClient.isHeartbeatRunning()) " - 5min heartbeat active" else ""
+                    tvStatus.text = "Connected - Awaiting server instructions$heartbeatStatus"
+                } else if (isConnectedToServer && isPingingActive) {
+                    tvStatus.text = "Connected - Executing ping instruction"
                 } else {
-                    btnStart.text = getString(R.string.start_ping)
+                    tvStatus.text = "Disconnected"
+                    tvServerInstructions.text = "Not connected to server"
                 }
             }
         }

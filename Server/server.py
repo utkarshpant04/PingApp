@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-REST API Server for Ping App with Data Storage and Location Support
-Handles data uploads from Android ping app and stores in SQLite database
+REST API Server for Ping App with Simple Always-Send Instructions
+Sends ping instructions on every heartbeat request
 """
-
+prob = 0.9
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import logging
@@ -12,6 +12,7 @@ from datetime import datetime
 import urllib.parse
 import os
 import threading
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,15 +22,21 @@ class PingDataServer:
     def __init__(self, db_path="ping_data.db"):
         self.db_path = db_path
         self.lock = threading.Lock()
+        self.ping_instructions = self.load_default_ping_instructions()
         self.init_database()
 
+    def load_default_ping_instructions(self):
+        return [
+            {"host": "google.com", "protocol": "TCP", "duration_seconds": 45, "interval_ms": 500},
+        ]
+
     def init_database(self):
-        """Initialize SQLite database with location support"""
+        """Initialize SQLite database"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
-            # Table for client/device information with location
+            # Table for client/device information
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS clients (
                     client_id TEXT PRIMARY KEY,
@@ -44,7 +51,7 @@ class PingDataServer:
                 )
             ''')
 
-            # Table for ping sessions with location data
+            # Table for ping sessions
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ping_sessions (
                     session_id TEXT PRIMARY KEY,
@@ -69,7 +76,7 @@ class PingDataServer:
                 )
             ''')
 
-            # Table for individual ping results with location
+            # Table for individual ping results
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ping_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +91,7 @@ class PingDataServer:
                 )
             ''')
 
-            # Table for heartbeat logs with location
+            # Table for heartbeat logs
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS heartbeats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,39 +100,20 @@ class PingDataServer:
                     app_status TEXT,
                     location TEXT,
                     timestamp TEXT,
+                    instruction_sent TEXT,
                     FOREIGN KEY (client_id) REFERENCES clients (client_id)
                 )
             ''')
 
-            # Check if location columns exist in existing tables (for database upgrades)
-            cursor.execute("PRAGMA table_info(clients)")
-            columns = [column[1] for column in cursor.fetchall()]
-            if 'last_location' not in columns:
-                cursor.execute('ALTER TABLE clients ADD COLUMN last_location TEXT DEFAULT "N/A"')
-                logger.info("Added last_location column to clients table")
-
-            cursor.execute("PRAGMA table_info(ping_sessions)")
-            columns = [column[1] for column in cursor.fetchall()]
-            if 'start_location' not in columns:
-                cursor.execute('ALTER TABLE ping_sessions ADD COLUMN start_location TEXT DEFAULT "N/A"')
-                cursor.execute('ALTER TABLE ping_sessions ADD COLUMN end_location TEXT DEFAULT "N/A"')
-                logger.info("Added location columns to ping_sessions table")
-
-            cursor.execute("PRAGMA table_info(ping_results)")
-            columns = [column[1] for column in cursor.fetchall()]
-            if 'location' not in columns:
-                cursor.execute('ALTER TABLE ping_results ADD COLUMN location TEXT DEFAULT "N/A"')
-                logger.info("Added location column to ping_results table")
-
             conn.commit()
             conn.close()
-            logger.info("Database initialized successfully with location support")
+            logger.info("Database initialized successfully")
 
         except Exception as e:
             logger.error(f"Database initialization error: {e}")
 
     def register_or_update_client(self, device_info):
-        """Register new client or update existing one with location"""
+        """Register new client or update existing one"""
         with self.lock:
             try:
                 conn = sqlite3.connect(self.db_path)
@@ -136,12 +124,11 @@ class PingDataServer:
                 location = device_info.get('location', 'N/A')
 
                 # Check if client exists
-                cursor.execute('SELECT client_id, total_sessions FROM clients WHERE client_id = ?', (client_id,))
+                cursor.execute('SELECT client_id FROM clients WHERE client_id = ?', (client_id,))
                 result = cursor.fetchone()
 
                 if result:
-                    # Update existing client with location
-                    total_sessions = result[1]
+                    # Update existing client
                     cursor.execute('''
                         UPDATE clients SET
                         last_seen = ?,
@@ -155,16 +142,15 @@ class PingDataServer:
                          device_info.get('app_version', ''),
                          location, client_id))
                 else:
-                    # Insert new client with location
-                    total_sessions = 0
+                    # Insert new client
                     cursor.execute('''
                         INSERT INTO clients
                         (client_id, device_id, device_model, android_version, app_version,
                          first_seen, last_seen, last_location, total_sessions)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
                     ''', (client_id, device_info['device_id'], device_info.get('device_model', ''),
                          device_info.get('android_version', ''), device_info.get('app_version', ''),
-                         current_time, current_time, location, total_sessions))
+                         current_time, current_time, location))
 
                 conn.commit()
                 conn.close()
@@ -174,27 +160,39 @@ class PingDataServer:
                 logger.error(f"Error registering client: {e}")
                 return None
 
+    def get_ping_instruction(self):
+        """Get a ping instruction - randomly select from available instructions"""
+        if self.ping_instructions:
+            return random.choice(self.ping_instructions)
+        return None
+
     def store_heartbeat(self, heartbeat_data):
-        """Store heartbeat with location data"""
+        """Store heartbeat and always return a ping instruction"""
         with self.lock:
             try:
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
 
+                # Get ping instruction
+                instruction = self.get_ping_instruction()
+                instruction_json = json.dumps(instruction) if instruction else ""
+
                 cursor.execute('''
                     INSERT INTO heartbeats
-                    (client_id, device_id, app_status, location, timestamp)
-                    VALUES (?, ?, ?, ?, ?)
+                    (client_id, device_id, app_status, location, timestamp, instruction_sent)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     heartbeat_data.get('client_id', ''),
                     heartbeat_data.get('device_id', ''),
                     heartbeat_data.get('app_status', 'unknown'),
                     heartbeat_data.get('location', 'N/A'),
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    instruction_json
                 ))
 
                 # Update client's last location
-                if heartbeat_data.get('client_id'):
+                client_id = heartbeat_data.get('client_id', '')
+                if client_id:
                     cursor.execute('''
                         UPDATE clients SET
                         last_seen = ?,
@@ -202,24 +200,25 @@ class PingDataServer:
                         WHERE client_id = ?
                     ''', (datetime.now().isoformat(),
                          heartbeat_data.get('location', 'N/A'),
-                         heartbeat_data.get('client_id')))
+                         client_id))
 
                 conn.commit()
                 conn.close()
-                return True
+
+                return instruction
 
             except Exception as e:
                 logger.error(f"Error storing heartbeat: {e}")
-                return False
+                return None
 
     def store_ping_session(self, session_data):
-        """Store complete ping session data with location information"""
+        """Store complete ping session data"""
         with self.lock:
             try:
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
 
-                # Insert session data with location
+                # Insert session data
                 cursor.execute('''
                     INSERT INTO ping_sessions
                     (session_id, client_id, host, protocol, start_time, end_time,
@@ -238,7 +237,7 @@ class PingDataServer:
                     session_data.get('end_location', 'N/A'), json.dumps(session_data.get('settings', {}))
                 ))
 
-                # Update client session count and last location
+                # Update client session count
                 cursor.execute('''
                     UPDATE clients SET
                     total_sessions = total_sessions + 1,
@@ -246,7 +245,7 @@ class PingDataServer:
                     WHERE client_id = ?
                 ''', (session_data.get('end_location', 'N/A'), session_data['client_id']))
 
-                # Store individual ping results with location if provided
+                # Store individual ping results if provided
                 if 'ping_results' in session_data:
                     for result in session_data['ping_results']:
                         cursor.execute('''
@@ -276,7 +275,7 @@ class PingDataServer:
 
             if client_id:
                 cursor.execute('''
-                    SELECT c.*, COUNT(s.session_id) as actual_sessions
+                    SELECT c.*, COUNT(s.session_id) as session_count
                     FROM clients c
                     LEFT JOIN ping_sessions s ON c.client_id = s.client_id
                     WHERE c.client_id = ?
@@ -288,7 +287,7 @@ class PingDataServer:
                     return dict(zip(columns, result))
             else:
                 cursor.execute('''
-                    SELECT c.*, COUNT(s.session_id) as actual_sessions
+                    SELECT c.*, COUNT(s.session_id) as session_count
                     FROM clients c
                     LEFT JOIN ping_sessions s ON c.client_id = s.client_id
                     GROUP BY c.client_id
@@ -302,43 +301,6 @@ class PingDataServer:
 
         except Exception as e:
             logger.error(f"Error getting client stats: {e}")
-            return None
-
-    def get_location_stats(self):
-        """Get location-based statistics"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            # Get session counts by location
-            cursor.execute('''
-                SELECT start_location, COUNT(*) as session_count
-                FROM ping_sessions
-                WHERE start_location != 'N/A'
-                GROUP BY start_location
-                ORDER BY session_count DESC
-            ''')
-            location_sessions = cursor.fetchall()
-
-            # Get unique locations from clients
-            cursor.execute('''
-                SELECT DISTINCT last_location, COUNT(*) as client_count
-                FROM clients
-                WHERE last_location != 'N/A'
-                GROUP BY last_location
-                ORDER BY client_count DESC
-            ''')
-            location_clients = cursor.fetchall()
-
-            conn.close()
-
-            return {
-                'sessions_by_location': [{'location': loc, 'count': count} for loc, count in location_sessions],
-                'clients_by_location': [{'location': loc, 'count': count} for loc, count in location_clients]
-            }
-
-        except Exception as e:
-            logger.error(f"Error getting location stats: {e}")
             return None
 
 # Global database instance
@@ -367,8 +329,6 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             self.handle_ping()
         elif path == '/api/clients':
             self.handle_get_clients()
-        elif path == '/api/locations':
-            self.handle_get_locations()
         elif path.startswith('/api/clients/'):
             client_id = path.split('/')[-1]
             self.handle_get_client_data(client_id)
@@ -427,9 +387,9 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
     def handle_api_info(self):
         """API information endpoint"""
         api_info = {
-            "name": "Ping App REST API with Location Support",
-            "version": "2.1.0",
-            "description": "REST API for Android Ping App with SQLite data storage and location tracking",
+            "name": "Simple Ping App REST API",
+            "version": "4.0.0",
+            "description": "Simple REST API that sends ping instructions on every heartbeat",
             "timestamp": datetime.now().isoformat(),
             "endpoints": {
                 "GET /api": "API information",
@@ -437,15 +397,15 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
                 "GET /api/ping": "Simple ping test",
                 "GET /api/clients": "List all clients",
                 "GET /api/clients/{id}": "Get specific client data",
-                "GET /api/locations": "Get location statistics",
-                "POST /api/connect": "Connect with device info and location",
-                "POST /api/heartbeat": "Send heartbeat signal with location",
-                "POST /api/upload-session": "Upload ping session data with location"
+                "POST /api/connect": "Connect with device info",
+                "POST /api/heartbeat": "Send heartbeat and get ping instruction",
+                "POST /api/upload-session": "Upload ping session results"
             },
-            "new_features": [
-                "Location tracking for clients and ping sessions",
-                "Location-based statistics",
-                "Enhanced heartbeat with location data"
+            "features": [
+                "Always sends ping instructions on heartbeat",
+                "Simple instruction selection",
+                "Basic data storage",
+                "Location tracking"
             ]
         }
 
@@ -456,12 +416,12 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
         """Server status endpoint"""
         status = {
             "status": "online",
-            "message": "Server is running with data storage and location support",
+            "message": "Server is running - always sends ping instructions",
             "timestamp": datetime.now().isoformat(),
             "database": "SQLite",
             "database_file": db.db_path,
             "client_ip": self.client_address[0],
-            "features": ["location_tracking", "data_storage", "heartbeat_monitoring"]
+            "instruction_mode": "always_send"
         }
 
         self.send_json_response(200, status)
@@ -479,24 +439,24 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
         logger.info(f"Ping test from {self.client_address[0]}")
 
     def handle_connect(self):
-        """Handle device connection with registration and location"""
+        """Handle device connection with registration"""
         try:
             request_data = self.parse_json_body()
 
-            # Register or update client with location
+            # Register or update client
             client_id = db.register_or_update_client(request_data)
 
             if client_id:
                 location = request_data.get('location', 'N/A')
-                logger.info(f"Client registered/updated: {client_id} at location: {location}")
+                logger.info(f"Client connected: {client_id} at location: {location}")
 
                 response = {
                     "status": "connected",
-                    "message": "Device registered successfully with location",
+                    "message": "Device registered successfully - will receive ping instructions on every heartbeat",
                     "client_id": client_id,
                     "location_recorded": location,
                     "timestamp": datetime.now().isoformat(),
-                    "server_time": datetime.now().isoformat()
+                    "instruction_mode": "always_send"
                 }
                 self.send_json_response(200, response)
             else:
@@ -510,24 +470,43 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             self.send_json_error(500, "Internal server error")
 
     def handle_heartbeat(self):
-        """Handle heartbeat signals with location"""
+        """Handle heartbeat signals and always send ping instructions"""
         try:
             request_data = self.parse_json_body()
-            device_id = request_data.get('device_id', 'unknown')
+            client_id = request_data.get('client_id', '')
             location = request_data.get('location', 'N/A')
 
-            # Store heartbeat data
-            db.store_heartbeat(request_data)
+            # Store heartbeat and get instruction (always returns one)
+            instruction = db.store_heartbeat(request_data)
 
-            logger.info(f"Heartbeat from device: {device_id} at location: {location}")
+            logger.info(f"Heartbeat from client: {client_id} at location: {location}")
 
+            # Build response with ping instruction
             response = {
                 "heartbeat": "acknowledged",
                 "server_status": "online",
                 "location_recorded": location,
                 "timestamp": datetime.now().isoformat(),
-                "next_heartbeat_in_seconds": 3600
+                "next_heartbeat_in_seconds": 30,
+                "send_ping": True
             }
+
+            # Add ping instruction (always available)
+            if instruction and random.random() < prob:  # 90% chance to send instruction
+                response.update({
+                    "ping_host": instruction["host"],
+                    "ping_protocol": instruction["protocol"],
+                    "ping_duration_seconds": instruction["duration_seconds"],
+                    "ping_interval_ms": instruction["interval_ms"],
+                    "instruction_id": f"inst_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                })
+                logger.info(f"Sent ping instruction to {client_id}: {instruction['host']} ({instruction['protocol']})")
+            else:
+                # Fallback (should not happen)
+                response.update({
+                    "send_ping": False,
+                    "message": "No ping instruction available"
+                })
 
             self.send_json_response(200, response)
 
@@ -536,7 +515,7 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             self.send_json_error(500, "Internal server error")
 
     def handle_upload_session(self):
-        """Handle ping session data upload with location"""
+        """Handle ping session data upload"""
         try:
             session_data = self.parse_json_body()
 
@@ -549,17 +528,18 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
                     self.send_json_error(400, f"Missing required field: {field}")
                     return
 
-            # Store session data with location
+            # Store session data
             success = db.store_ping_session(session_data)
 
             if success:
                 start_loc = session_data.get('start_location', 'N/A')
                 end_loc = session_data.get('end_location', 'N/A')
+
                 logger.info(f"Session data stored: {session_data['session_id']} from {session_data['client_id']} (Location: {start_loc} -> {end_loc})")
 
                 response = {
                     "status": "success",
-                    "message": "Session data uploaded successfully with location",
+                    "message": "Session data uploaded successfully",
                     "session_id": session_data['session_id'],
                     "start_location": start_loc,
                     "end_location": end_loc,
@@ -614,47 +594,27 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             logger.error(f"Error getting client data: {e}")
             self.send_json_error(500, "Internal server error")
 
-    def handle_get_locations(self):
-        """Get location-based statistics"""
-        try:
-            location_stats = db.get_location_stats()
-
-            if location_stats:
-                response = {
-                    "status": "success",
-                    "location_statistics": location_stats,
-                    "timestamp": datetime.now().isoformat()
-                }
-                self.send_json_response(200, response)
-            else:
-                self.send_json_error(500, "Failed to retrieve location statistics")
-
-        except Exception as e:
-            logger.error(f"Error getting location stats: {e}")
-            self.send_json_error(500, "Internal server error")
-
     def log_message(self, format, *args):
         """Override to use our logger"""
         logger.info(f"{self.client_address[0]} - {format % args}")
 
 def run_server(port=8080):
-    """Start the REST API server"""
+    """Start the simplified REST API server"""
     server_address = ('', port)
     httpd = HTTPServer(server_address, PingRestApiHandler)
 
-    logger.info(f"Starting Ping REST API Server with Location Support on port {port}")
+    logger.info(f"Starting Simple Ping REST API Server on port {port}")
     logger.info("Available REST endpoints:")
     logger.info("  GET  /api                - API information")
     logger.info("  GET  /api/status         - Server status")
     logger.info("  GET  /api/ping           - Simple ping test")
     logger.info("  GET  /api/clients        - List all clients")
     logger.info("  GET  /api/clients/{id}   - Get client data")
-    logger.info("  GET  /api/locations      - Get location statistics")
-    logger.info("  POST /api/connect        - Connect device with location")
-    logger.info("  POST /api/heartbeat      - Send heartbeat with location")
-    logger.info("  POST /api/upload-session - Upload session data with location")
+    logger.info("  POST /api/connect        - Connect device")
+    logger.info("  POST /api/heartbeat      - Send heartbeat and get ping instruction")
+    logger.info("  POST /api/upload-session - Upload session results")
     logger.info(f"Database: {db.db_path}")
-    logger.info("New features: Location tracking, Enhanced statistics")
+    logger.info("Mode: ALWAYS SEND PING INSTRUCTIONS ON HEARTBEAT")
 
     try:
         httpd.serve_forever()
@@ -665,7 +625,7 @@ def run_server(port=8080):
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='REST API Server for Ping App with Location Support')
+    parser = argparse.ArgumentParser(description='Simple Ping REST API Server')
     parser.add_argument('--port', type=int, default=8080, help='Server port (default: 8080)')
     parser.add_argument('--db', type=str, default='ping_data.db', help='Database file path')
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-// Updated RestApiClient.kt with location data collection and upload
+// Fixed RestApiClient.kt with proper 5-minute heartbeat interval and improved logging
 
 package com.example.myfirstapp
 
@@ -12,6 +12,7 @@ import org.json.JSONObject
 import java.io.*
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
 import java.util.*
 
 class RestApiClient(private val context: Context) {
@@ -21,6 +22,7 @@ class RestApiClient(private val context: Context) {
         private const val SERVER_BASE_URL = "http://10.0.2.2:8080/api" // Change to your server IP
         private const val CONNECT_TIMEOUT = 10000
         private const val READ_TIMEOUT = 15000
+        private const val HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes in milliseconds
     }
 
     private val deviceId: String by lazy {
@@ -28,6 +30,10 @@ class RestApiClient(private val context: Context) {
     }
 
     private var clientId: String? = null
+    private var heartbeatJob: Job? = null
+    private var isHeartbeatActive = false
+    private var onInstructionReceived: ((ServerInstruction) -> Unit)? = null
+    private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     /**
      * Test server connection with ping
@@ -45,7 +51,7 @@ class RestApiClient(private val context: Context) {
                     connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
                 }
 
-                Log.i(TAG, "Ping response: $responseCode - $response")
+                Log.i(TAG, " Server ping response: $responseCode - $response")
 
                 if (responseCode == HttpURLConnection.HTTP_OK) {
                     ApiResponse.Success(JSONObject(response))
@@ -54,7 +60,7 @@ class RestApiClient(private val context: Context) {
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Ping failed", e)
+                Log.e(TAG, " Server ping failed", e)
                 ApiResponse.Error(-1, "Network error: ${e.message}")
             }
         }
@@ -72,7 +78,7 @@ class RestApiClient(private val context: Context) {
                 // Prepare device info JSON with location
                 val deviceInfo = JSONObject().apply {
                     put("device_id", deviceId)
-                    put("app_version", "1.0.0")
+                    put("app_version", "2.0.0")
                     put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("android_version", Build.VERSION.RELEASE)
                     put("location", location)
@@ -91,27 +97,125 @@ class RestApiClient(private val context: Context) {
                     connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
                 }
 
-                Log.i(TAG, "Connect response: $responseCode - $response")
+                Log.i(TAG, "🔗 Server connect response: $responseCode - $response")
 
                 if (responseCode == HttpURLConnection.HTTP_OK) {
                     val responseJson = JSONObject(response)
                     clientId = responseJson.optString("client_id")
+                    Log.i(TAG, "Connected to server with client_id: $clientId")
                     ApiResponse.Success(responseJson)
                 } else {
                     ApiResponse.Error(responseCode, response)
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Connection failed", e)
+                Log.e(TAG, "Server connection failed", e)
                 ApiResponse.Error(-1, "Network error: ${e.message}")
             }
         }
     }
 
     /**
-     * Send heartbeat to server with location
+     * Start automatic heartbeat every 5 minutes
      */
-    suspend fun sendHeartbeat(appStatus: String = "running", location: String = "N/A"): ApiResponse {
+    fun startHeartbeat(
+        scope: CoroutineScope,
+        location: String = "N/A",
+        onInstruction: ((ServerInstruction) -> Unit)? = null
+    ) {
+        if (isHeartbeatActive) {
+            Log.w(TAG, "Heartbeat already active, stopping existing one first")
+            stopHeartbeat()
+        }
+
+        onInstructionReceived = onInstruction
+        isHeartbeatActive = true
+
+        Log.i(TAG, "Starting 5-minute heartbeat system at ${dateFormat.format(Date())}")
+
+        heartbeatJob = scope.launch {
+            var heartbeatCount = 0
+
+            // Send immediate first heartbeat
+            sendSingleHeartbeat(location, ++heartbeatCount)
+
+            while (isActive && isHeartbeatActive) {
+                Log.d(TAG, " Waiting 5 minutes until next heartbeat...")
+                delay(HEARTBEAT_INTERVAL_MS)
+
+                if (isActive && isHeartbeatActive) {
+                    sendSingleHeartbeat(location, ++heartbeatCount)
+                }
+            }
+
+            Log.i(TAG, "Heartbeat coroutine finished")
+        }
+    }
+
+    /**
+     * Stop automatic heartbeat
+     */
+    fun stopHeartbeat() {
+        val wasActive = isHeartbeatActive
+        Log.i(TAG, " Stopping heartbeat at ${dateFormat.format(Date())} - was active: $wasActive")
+
+        isHeartbeatActive = false
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+        onInstructionReceived = null
+
+        if (wasActive) {
+            Log.i(TAG, "Heartbeat system stopped successfully")
+        }
+    }
+
+    /**
+     * Send a single heartbeat and check for instructions
+     */
+    private suspend fun sendSingleHeartbeat(location: String = "N/A", count: Int = 0) {
+        val currentTime = dateFormat.format(Date())
+
+        try {
+            Log.d(TAG, "Sending heartbeat #$count at $currentTime")
+
+            val response = sendHeartbeatAndCheckInstructions("connected", location)
+
+            when (response) {
+                is ApiResponse.Success -> {
+                    val data = response.data
+                    Log.i(TAG, "Heartbeat #$count successful at $currentTime")
+
+                    // Check for server instructions
+                    if (data.optBoolean("send_ping", false)) {
+                        val instruction = ServerInstruction(
+                            sendPing = true,
+                            host = data.getStringOrDefault("ping_host"),
+                            protocol = data.getStringOrDefault("ping_protocol", "TCP"),
+                            durationSeconds = data.optInt("ping_duration_seconds", 60),
+                            intervalMs = data.optLong("ping_interval_ms", 1000L)
+                        )
+
+                        Log.i(TAG, " Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
+                        onInstructionReceived?.invoke(instruction)
+                    } else {
+                        Log.d(TAG, " Heartbeat #$count: No server instruction - standing by")
+                        // Still notify that heartbeat was received but no instruction
+                        onInstructionReceived?.invoke(ServerInstruction(sendPing = false))
+                    }
+                }
+                is ApiResponse.Error -> {
+                    Log.e(TAG, "Heartbeat #$count failed at $currentTime: ${response.code} - ${response.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, " Error during heartbeat #$count at $currentTime", e)
+        }
+    }
+
+    /**
+     * Send heartbeat to server with location and check for ping instructions
+     */
+    suspend fun sendHeartbeatAndCheckInstructions(appStatus: String = "connected", location: String = "N/A"): ApiResponse {
         return withContext(Dispatchers.IO) {
             try {
                 val url = URL("$SERVER_BASE_URL/heartbeat")
@@ -119,10 +223,12 @@ class RestApiClient(private val context: Context) {
 
                 val heartbeatData = JSONObject().apply {
                     put("device_id", deviceId)
-                    put("client_id", clientId)
+                    put("client_id", clientId ?: "unknown")
                     put("app_status", appStatus)
                     put("location", location)
                     put("timestamp", System.currentTimeMillis())
+                    put("request_instructions", true) // Request server instructions
+                    put("heartbeat_interval_ms", HEARTBEAT_INTERVAL_MS) // Inform server of our heartbeat interval
                 }
 
                 connection.outputStream.use { os ->
@@ -136,23 +242,30 @@ class RestApiClient(private val context: Context) {
                     connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
                 }
 
-                Log.i(TAG, "Heartbeat response: $responseCode")
+                Log.d(TAG, " Heartbeat response: $responseCode")
 
                 if (responseCode == HttpURLConnection.HTTP_OK) {
-                    ApiResponse.Success(JSONObject(response))
+                    val responseJson = JSONObject(response)
+                    // Log server instructions if present
+                    if (responseJson.optBoolean("send_ping", false)) {
+                        Log.i(TAG, " Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")})")
+                    } else {
+                        Log.d(TAG, " Heartbeat response: No server instructions")
+                    }
+                    ApiResponse.Success(responseJson)
                 } else {
                     ApiResponse.Error(responseCode, response)
                 }
 
             } catch (e: Exception) {
-                Log.e(TAG, "Heartbeat failed", e)
+                Log.e(TAG, " Heartbeat request failed", e)
                 ApiResponse.Error(-1, "Network error: ${e.message}")
             }
         }
     }
 
     /**
-     * Upload ping session data to server with location information
+     * Upload ping session data to server with location information (for server-instructed pings)
      */
     suspend fun uploadPingSession(sessionData: PingSessionData): ApiResponse {
         return withContext(Dispatchers.IO) {
@@ -160,7 +273,7 @@ class RestApiClient(private val context: Context) {
                 val url = URL("$SERVER_BASE_URL/upload-session")
                 val connection = createConnection(url, "POST")
 
-                // Prepare session data JSON with location
+                // Prepare session data JSON with location and server instruction flag
                 val sessionJson = JSONObject().apply {
                     put("session_id", sessionData.sessionId)
                     put("client_id", clientId ?: "unknown")
@@ -179,6 +292,7 @@ class RestApiClient(private val context: Context) {
                     put("avg_bandwidth_bps", sessionData.avgBandwidthBps)
                     put("start_location", sessionData.startLocation)
                     put("end_location", sessionData.endLocation)
+                    put("server_instructed", sessionData.sessionId.contains("server_session")) // Flag for server-instructed pings
 
                     // Settings used
                     val settingsJson = JSONObject().apply {
@@ -241,6 +355,23 @@ class RestApiClient(private val context: Context) {
     fun getClientId(): String? = clientId
 
     /**
+     * Check if heartbeat is currently active
+     */
+    fun isHeartbeatRunning(): Boolean = isHeartbeatActive && heartbeatJob?.isActive == true
+
+    /**
+     * Get heartbeat interval in milliseconds
+     */
+    fun getHeartbeatIntervalMs(): Long = HEARTBEAT_INTERVAL_MS
+
+    /**
+     * Get heartbeat status for debugging
+     */
+    fun getHeartbeatStatus(): String {
+        return "Heartbeat active: $isHeartbeatActive, Job active: ${heartbeatJob?.isActive}, Interval: ${HEARTBEAT_INTERVAL_MS / 1000 / 60} minutes"
+    }
+
+    /**
      * Create HTTP connection with proper headers
      */
     private fun createConnection(url: URL, method: String): HttpURLConnection {
@@ -251,7 +382,7 @@ class RestApiClient(private val context: Context) {
             readTimeout = READ_TIMEOUT
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "PingApp-Android/1.0")
+            setRequestProperty("User-Agent", "PingApp-Android-5MinHeartbeat/2.0")
 
             if (method == "POST") {
                 doOutput = true
@@ -262,7 +393,7 @@ class RestApiClient(private val context: Context) {
 }
 
 /**
- * Data classes for ping session information with location data
+ * Data classes for ping session information with location data and server instruction support
  */
 data class PingSessionData(
     val sessionId: String,
@@ -300,6 +431,17 @@ data class PingResult(
     val rttMs: Double,
     val location: String = "N/A",
     val errorMessage: String = ""
+)
+
+/**
+ * Server instruction data class
+ */
+data class ServerInstruction(
+    val sendPing: Boolean,
+    val host: String = "",
+    val protocol: String = "ICMP",
+    val durationSeconds: Int = 60,
+    val intervalMs: Long = 1000L
 )
 
 /**

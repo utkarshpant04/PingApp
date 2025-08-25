@@ -22,6 +22,11 @@ class PingService : Service() {
     private var pingJob: Job? = null
     private var serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Server-controlled mode variables
+    private var isInServerControlledMode = false
+    private var isExecutingPingInstruction = false
+
+    // Session tracking
     private var packetsSent = 0
     private var packetsReceived = 0
     private var currentHost = ""
@@ -68,7 +73,7 @@ class PingService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        stopPinging()
+        stopAllOperations()
         serviceScope.cancel()
     }
 
@@ -103,6 +108,8 @@ class PingService : Service() {
     }
 
     private fun updateNotification() {
+        if (!isExecutingPingInstruction) return
+
         val loss = if (packetsSent > 0) {
             ((packetsSent - packetsReceived) * 100) / packetsSent
         } else 0
@@ -110,7 +117,7 @@ class PingService : Service() {
         val bandwidth = calculateBandwidth()
 
         val notification = createNotification(
-            getString(R.string.pinging_host, currentHost, currentProtocol),
+            getString(R.string.executing_server_instruction, currentHost, currentProtocol),
             "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
         )
 
@@ -129,12 +136,58 @@ class PingService : Service() {
         this.udpPort = udpPort
     }
 
-    fun startPinging(host: String, protocol: String, interval: Long,
-                     packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int, location: String) {
-        if (pingJob?.isActive == true) {
-            stopPinging()
+    fun startServerControlledMode() {
+        isInServerControlledMode = true
+
+        // Start foreground service for server-controlled mode
+        val notification = createNotification(
+            getString(R.string.server_controlled_mode),
+            getString(R.string.awaiting_server_instructions)
+        )
+        startForeground(NOTIFICATION_ID, notification)
+
+        log("Entered server-controlled mode - awaiting instructions")
+    }
+
+    fun stopServerControlledMode() {
+        isInServerControlledMode = false
+
+        // Stop any ongoing ping instruction
+        serviceScope.launch {
+            pingJob?.cancelAndJoin()
+            pingJob = null
+            isExecutingPingInstruction = false
+
+            stopForeground(true)
+            log("Exited server-controlled mode")
+        }
+    }
+
+    fun executePingInstruction(
+        host: String, protocol: String, interval: Long, durationSeconds: Int,
+        packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int, location: String
+    ) {
+        if (!isInServerControlledMode) {
+            log("Cannot execute ping instruction - not in server-controlled mode")
+            return
         }
 
+        if (isExecutingPingInstruction) {
+            log("Cannot execute ping instruction - already executing another instruction")
+            return
+        }
+
+        // Cancel any existing ping job
+        serviceScope.launch {
+            pingJob?.cancelAndJoin()
+            startPingInstruction(host, protocol, interval, durationSeconds, packetSize, timeout, tcpPort, udpPort, location)
+        }
+    }
+
+    private suspend fun startPingInstruction(
+        host: String, protocol: String, interval: Long, durationSeconds: Int,
+        packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int, location: String
+    ) {
         // Initialize session data
         currentHost = host
         currentProtocol = protocol
@@ -144,7 +197,7 @@ class PingService : Service() {
         packetsReceived = 0
         totalBytesTransferred = 0L
         startTime = System.currentTimeMillis()
-        sessionId = "session_${System.currentTimeMillis()}_${(1000..9999).random()}"
+        sessionId = "server_session_${System.currentTimeMillis()}_${(1000..9999).random()}"
         pingResults.clear()
         minRtt = Double.MAX_VALUE
         maxRtt = 0.0
@@ -155,19 +208,24 @@ class PingService : Service() {
         this.tcpPort = tcpPort
         this.udpPort = udpPort
 
-        // Start foreground service
-        val notification = createNotification(
-            getString(R.string.starting_ping, host),
-            getString(R.string.initializing_ping, protocol)
-        )
-        startForeground(NOTIFICATION_ID, notification)
+        isExecutingPingInstruction = true
 
-        // Log initial location
-        log("Starting ping to $host ($protocol) - Session: $sessionId - Location: $location")
+        // Update notification
+        val notification = createNotification(
+            getString(R.string.executing_server_instruction, host, protocol),
+            getString(R.string.ping_duration_remaining, durationSeconds)
+        )
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, notification)
+
+        // Log initial information
+        log("Executing server ping instruction: $host ($protocol) for ${durationSeconds}s - Session: $sessionId - Location: $location")
 
         pingJob = serviceScope.launch {
+            val endTime = System.currentTimeMillis() + (durationSeconds * 1000)
             var sequenceNumber = 0
-            while (isActive) {
+
+            while (isActive && System.currentTimeMillis() < endTime && isExecutingPingInstruction) {
                 packetsSent++
                 sequenceNumber++
                 val success: Boolean
@@ -212,11 +270,12 @@ class PingService : Service() {
                 } else 0
 
                 val bandwidth = calculateBandwidth()
+                val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Location: $location")
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Location: $location")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 }
 
                 // Update notification every 5 pings or on first ping
@@ -226,77 +285,96 @@ class PingService : Service() {
 
                 delay(interval)
             }
+
+            // Ping instruction completed
+            finishPingInstruction()
         }
     }
 
-    fun stopPinging() {
-        serviceScope.launch {
-            pingJob?.cancelAndJoin()
-            pingJob = null // Clear the job reference
+    private suspend fun finishPingInstruction() {
+        isExecutingPingInstruction = false
 
-            val endTime = System.currentTimeMillis()
-            val duration = (endTime - startTime) / 1000 // seconds
+        val endTime = System.currentTimeMillis()
+        val duration = (endTime - startTime) / 1000 // seconds
 
-            val loss = if (packetsSent > 0) {
-                ((packetsSent - packetsReceived) * 100.0) / packetsSent
-            } else 0.0
+        val loss = if (packetsSent > 0) {
+            ((packetsSent - packetsReceived) * 100.0) / packetsSent
+        } else 0.0
 
-            val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
-            val bandwidth = calculateBandwidth()
+        val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
+        val bandwidth = calculateBandwidth()
 
-            log("Ping stopped | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $currentLocation")
+        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $currentLocation")
 
-            // Prepare session data for server upload
-            val sessionData = PingSessionData(
-                sessionId = sessionId,
-                host = currentHost,
-                protocol = currentProtocol,
-                startTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(startTime)),
-                endTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(endTime)),
-                durationSeconds = duration,
-                packetsSent = packetsSent,
-                packetsReceived = packetsReceived,
-                packetLossPercent = loss,
-                avgRttMs = avgRtt,
-                minRttMs = if (minRtt == Double.MAX_VALUE) 0.0 else minRtt,
-                maxRttMs = maxRtt,
-                totalBytes = totalBytesTransferred,
-                avgBandwidthBps = bandwidth,
-                startLocation = startLocation,
-                endLocation = currentLocation,
-                settings = PingSettings(
-                    packetSize = packetSize,
-                    timeout = timeout,
-                    interval = 1000L, // Default interval
-                    tcpPort = tcpPort,
-                    udpPort = udpPort
-                ),
-                pingResults = pingResults.toList()
-            )
+        // Prepare session data for server upload
+        val sessionData = PingSessionData(
+            sessionId = sessionId,
+            host = currentHost,
+            protocol = currentProtocol,
+            startTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(startTime)),
+            endTime = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(endTime)),
+            durationSeconds = duration,
+            packetsSent = packetsSent,
+            packetsReceived = packetsReceived,
+            packetLossPercent = loss,
+            avgRttMs = avgRtt,
+            minRttMs = if (minRtt == Double.MAX_VALUE) 0.0 else minRtt,
+            maxRttMs = maxRtt,
+            totalBytes = totalBytesTransferred,
+            avgBandwidthBps = bandwidth,
+            startLocation = startLocation,
+            endLocation = currentLocation,
+            settings = PingSettings(
+                packetSize = packetSize,
+                timeout = timeout,
+                interval = 1000L, // Default interval
+                tcpPort = tcpPort,
+                udpPort = udpPort
+            ),
+            pingResults = pingResults.toList()
+        )
 
-            // Upload session data to server
-            try {
-                apiClient?.let { client ->
-                    val result = client.uploadPingSession(sessionData)
-                    when (result) {
-                        is ApiResponse.Success -> {
-                            log("Session data uploaded to server successfully")
-                        }
-                        is ApiResponse.Error -> {
-                            log("Failed to upload session data: ${result.message}")
-                        }
+        // Upload session data to server
+        try {
+            apiClient?.let { client ->
+                val result = client.uploadPingSession(sessionData)
+                when (result) {
+                    is ApiResponse.Success -> {
+                        log("Server instruction results uploaded successfully")
+                    }
+                    is ApiResponse.Error -> {
+                        log("Failed to upload server instruction results: ${result.message}")
                     }
                 }
-            } catch (e: Exception) {
-                log("Error uploading session data: ${e.message}")
             }
+        } catch (e: Exception) {
+            log("Error uploading server instruction results: ${e.message}")
+        }
+
+        // Reset notification to server-controlled mode if still in that mode
+        if (isInServerControlledMode) {
+            val notification = createNotification(
+                getString(R.string.server_controlled_mode),
+                getString(R.string.awaiting_server_instructions)
+            )
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun stopAllOperations() {
+        serviceScope.launch {
+            pingJob?.cancelAndJoin()
+            pingJob = null
+            isExecutingPingInstruction = false
+            isInServerControlledMode = false
 
             // Stop foreground service
             stopForeground(true)
         }
     }
 
-    fun isRunning(): Boolean = pingJob?.isActive == true
+    fun isExecutingServerInstruction(): Boolean = isExecutingPingInstruction
 
     fun getCurrentLocation(): String = currentLocation
 
