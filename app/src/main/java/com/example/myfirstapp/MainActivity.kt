@@ -252,7 +252,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             runOnUiThread {
                 if (instruction.sendPing) {
                     tvServerInstructions.text = "Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-                    tvLog.append("💓 Heartbeat received server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s\n")
+                    tvLog.append("Heartbeat received server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s\n")
 
                     // Execute ping as instructed by server
                     pingService?.executePingInstruction(

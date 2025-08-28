@@ -1,4 +1,4 @@
-// Fixed RestApiClient.kt with proper 5-minute heartbeat interval and improved logging
+// Fixed RestApiClient.kt with proper 5-minute heartbeat interval, delay handling, and improved logging
 
 package com.example.myfirstapp
 
@@ -22,7 +22,7 @@ class RestApiClient(private val context: Context) {
         private const val SERVER_BASE_URL = "http://10.0.2.2:8080/api" // Change to your server IP
         private const val CONNECT_TIMEOUT = 10000
         private const val READ_TIMEOUT = 15000
-        private const val HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes in milliseconds
+        private const val HEARTBEAT_INTERVAL_MS = 1 * 60 * 1000L // 5 minutes in milliseconds
     }
 
     private val deviceId: String by lazy {
@@ -137,14 +137,25 @@ class RestApiClient(private val context: Context) {
             var heartbeatCount = 0
 
             // Send immediate first heartbeat
-            sendSingleHeartbeat(location, ++heartbeatCount)
+            val delayUsed = sendSingleHeartbeat(location, ++heartbeatCount)
 
             while (isActive && isHeartbeatActive) {
-                Log.d(TAG, " Waiting 5 minutes until next heartbeat...")
-                delay(HEARTBEAT_INTERVAL_MS)
+                // Calculate next heartbeat delay: full interval minus any delay used for instruction
+                val nextHeartbeatDelay = HEARTBEAT_INTERVAL_MS - delayUsed
+
+                Log.d(TAG, " Waiting ${nextHeartbeatDelay / 1000}s until next heartbeat (normal: ${HEARTBEAT_INTERVAL_MS / 1000}s, instruction delay was: ${delayUsed}ms)")
+
+                if (nextHeartbeatDelay > 0) {
+                    delay(nextHeartbeatDelay)
+                } else {
+                    // If delay was longer than heartbeat interval, send immediately
+                    Log.w(TAG, " Instruction delay (${delayUsed}ms) exceeded heartbeat interval, sending heartbeat immediately")
+                }
 
                 if (isActive && isHeartbeatActive) {
-                    sendSingleHeartbeat(location, ++heartbeatCount)
+                    val newDelayUsed = sendSingleHeartbeat(location, ++heartbeatCount)
+                    // Update delay for next iteration
+                    // delayUsed = newDelayUsed  // This would be used if we want to carry over delays, but typically we reset
                 }
             }
 
@@ -171,9 +182,11 @@ class RestApiClient(private val context: Context) {
 
     /**
      * Send a single heartbeat and check for instructions
+     * Returns the delay used for executing instructions
      */
-    private suspend fun sendSingleHeartbeat(location: String = "N/A", count: Int = 0) {
+    private suspend fun sendSingleHeartbeat(location: String = "N/A", count: Int = 0): Long {
         val currentTime = dateFormat.format(Date())
+        var delayUsed = 0L
 
         try {
             Log.d(TAG, "Sending heartbeat #$count at $currentTime")
@@ -187,15 +200,27 @@ class RestApiClient(private val context: Context) {
 
                     // Check for server instructions
                     if (data.optBoolean("send_ping", false)) {
+                        val delayMs = data.optLong("delay_ms", 0)
+
                         val instruction = ServerInstruction(
                             sendPing = true,
                             host = data.getStringOrDefault("ping_host"),
                             protocol = data.getStringOrDefault("ping_protocol", "TCP"),
                             durationSeconds = data.optInt("ping_duration_seconds", 60),
-                            intervalMs = data.optLong("ping_interval_ms", 1000L)
+                            intervalMs = data.optLong("ping_interval_ms", 1000L),
+                            delay = delayMs
                         )
 
-                        Log.i(TAG, " Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
+                        Log.i(TAG, " Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s with ${delayMs}ms delay")
+
+                        // Apply delay before executing instruction
+                        if (delayMs > 0) {
+                            Log.i(TAG, " Waiting ${delayMs}ms before executing instruction...")
+                            delay(delayMs)
+                            delayUsed = delayMs
+                            Log.i(TAG, " Delay completed, executing instruction now")
+                        }
+
                         onInstructionReceived?.invoke(instruction)
                     } else {
                         Log.d(TAG, " Heartbeat #$count: No server instruction - standing by")
@@ -210,6 +235,8 @@ class RestApiClient(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, " Error during heartbeat #$count at $currentTime", e)
         }
+
+        return delayUsed
     }
 
     /**
@@ -248,7 +275,8 @@ class RestApiClient(private val context: Context) {
                     val responseJson = JSONObject(response)
                     // Log server instructions if present
                     if (responseJson.optBoolean("send_ping", false)) {
-                        Log.i(TAG, " Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")})")
+                        val delayMs = responseJson.optLong("delay_ms", 0)
+                        Log.i(TAG, " Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")}) with ${delayMs}ms delay")
                     } else {
                         Log.d(TAG, " Heartbeat response: No server instructions")
                     }
@@ -274,6 +302,8 @@ class RestApiClient(private val context: Context) {
                 val connection = createConnection(url, "POST")
 
                 // Prepare session data JSON with location and server instruction flag
+                Log.i(TAG, "client_id: $clientId")
+
                 val sessionJson = JSONObject().apply {
                     put("session_id", sessionData.sessionId)
                     put("client_id", clientId ?: "unknown")
@@ -441,7 +471,8 @@ data class ServerInstruction(
     val host: String = "",
     val protocol: String = "ICMP",
     val durationSeconds: Int = 60,
-    val intervalMs: Long = 1000L
+    val intervalMs: Long = 1000L,
+    val delay: Long = 0L,
 )
 
 /**
