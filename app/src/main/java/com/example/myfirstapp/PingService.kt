@@ -26,12 +26,15 @@ class PingService : Service() {
     private var isInServerControlledMode = false
     private var isExecutingPingInstruction = false
 
+    // Location tracking
+    private var locationPermissionGranted = false
+    private var currentLocation = "N/A"
+
     // Session tracking
     private var packetsSent = 0
     private var packetsReceived = 0
     private var currentHost = ""
     private var currentProtocol = ""
-    private var currentLocation = "N/A"
     private var totalBytesTransferred = 0L
     private var startTime = 0L
     private var sessionId = ""
@@ -118,7 +121,7 @@ class PingService : Service() {
 
         val notification = createNotification(
             getString(R.string.executing_server_instruction, currentHost, currentProtocol),
-            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
+            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $currentLocation"
         )
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -136,17 +139,41 @@ class PingService : Service() {
         this.udpPort = udpPort
     }
 
+    /**
+     * Update location permission status
+     */
+    fun updateLocationPermissionStatus(granted: Boolean) {
+        locationPermissionGranted = granted
+        if (!granted) {
+            currentLocation = "Permission Denied"
+        }
+        log("Location permission updated: ${if (granted) "granted" else "denied"}")
+    }
+
+    /**
+     * Update current location from MainActivity
+     */
+    fun updateCurrentLocation(location: String) {
+        if (locationPermissionGranted) {
+            currentLocation = location
+            // Update notification if actively pinging
+            if (isExecutingPingInstruction) {
+                updateNotification()
+            }
+        }
+    }
+
     fun startServerControlledMode() {
         isInServerControlledMode = true
 
         // Start foreground service for server-controlled mode
         val notification = createNotification(
             getString(R.string.server_controlled_mode),
-            getString(R.string.awaiting_server_instructions)
+            "Awaiting server instructions | Location: $currentLocation"
         )
         startForeground(NOTIFICATION_ID, notification)
 
-        log("Entered server-controlled mode - awaiting instructions")
+        log("Entered server-controlled mode - awaiting instructions | Location permission: ${if (locationPermissionGranted) "granted" else "denied"}")
     }
 
     fun stopServerControlledMode() {
@@ -176,6 +203,9 @@ class PingService : Service() {
             log("Cannot execute ping instruction - already executing another instruction")
             return
         }
+
+        // Update current location
+        currentLocation = location
 
         // Cancel any existing ping job
         serviceScope.launch {
@@ -213,13 +243,13 @@ class PingService : Service() {
         // Update notification
         val notification = createNotification(
             getString(R.string.executing_server_instruction, host, protocol),
-            getString(R.string.ping_duration_remaining, durationSeconds)
+            "Duration: ${durationSeconds}s | Location: $location"
         )
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, notification)
 
         // Log initial information
-        log("Executing server ping instruction: $host ($protocol) for ${durationSeconds}s - Session: $sessionId - Location: $location")
+        log("Executing server ping instruction: $host ($protocol) for ${durationSeconds}s - Session: $sessionId - Start Location: $location")
 
         pingJob = serviceScope.launch {
             val endTime = System.currentTimeMillis() + (durationSeconds * 1000)
@@ -238,13 +268,13 @@ class PingService : Service() {
                     }
                 }
 
-                // Record ping result
+                // Record ping result with current location
                 val pingResult = PingResult(
                     timestamp = System.currentTimeMillis().toString(),
                     sequence = sequenceNumber,
                     success = success,
                     rttMs = rtt.toDouble(),
-                    location = location,
+                    location = currentLocation, // Use current location which may have been updated
                     errorMessage = if (!success) "Request timed out" else ""
                 )
                 pingResults.add(pingResult)
@@ -273,12 +303,12 @@ class PingService : Service() {
                 val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $currentLocation | Remaining: ${remainingTime}s")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $currentLocation | Remaining: ${remainingTime}s")
                 }
 
-                // Update notification every 5 pings or on first ping
+                // Update notification every 5 pings or on first ping to show current location
                 if (packetsSent == 1 || packetsSent % 5 == 0) {
                     updateNotification()
                 }
@@ -304,7 +334,7 @@ class PingService : Service() {
         val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
         val bandwidth = calculateBandwidth()
 
-        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $currentLocation")
+        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Start Location: $startLocation | Final Location: $currentLocation")
 
         // Prepare session data for server upload
         val sessionData = PingSessionData(
@@ -340,7 +370,7 @@ class PingService : Service() {
                 val result = client.uploadPingSession(sessionData)
                 when (result) {
                     is ApiResponse.Success -> {
-                        log("Server instruction results uploaded successfully")
+                        log("Server instruction results uploaded successfully (with location changes)")
                     }
                     is ApiResponse.Error -> {
                         log("Failed to upload server instruction results: ${result.message}")
@@ -355,7 +385,7 @@ class PingService : Service() {
         if (isInServerControlledMode) {
             val notification = createNotification(
                 getString(R.string.server_controlled_mode),
-                getString(R.string.awaiting_server_instructions)
+                "Awaiting server instructions | Location: $currentLocation"
             )
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify(NOTIFICATION_ID, notification)
