@@ -106,7 +106,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         apiClient = RestApiClient(this)
 
         // Request location permissions if not granted
-        requestLocationPermissions()
+//        requestLocationPermissions()
 
         // Bind to the service
         val serviceIntent = Intent(this, PingService::class.java)
@@ -446,45 +446,34 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         lifecycleScope.launch {
             try {
-                // First test server connectivity
+                // Attempt to connect directly without a preliminary ping
                 tvStatus.text = "Connecting to server..."
-                val pingResult = apiClient.pingServer()
+                val location = getCurrentLocationString()
+                val connectResult = apiClient.connectToServer(location)
 
-                when (pingResult) {
+                when (connectResult) {
                     is ApiResponse.Success -> {
-                        // Server is reachable, now connect with device info
-                        val location = getCurrentLocationString()
-                        val connectResult = apiClient.connectToServer(location)
+                        isConnectedToServer = true
+                        tvStatus.text = "Connected to server"
+                        Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
-                        when (connectResult) {
-                            is ApiResponse.Success -> {
-                                isConnectedToServer = true
-                                tvStatus.text = "Connected to server"
-                                Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
+                        // Clear log and show connection info
+                        tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
 
-                                // Clear log and show connection info
-                                tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
+                        // Start service for server-controlled operations
+                        pingService?.startServerControlledMode()
 
-                                // Start service for server-controlled operations
-                                pingService?.startServerControlledMode()
+                        // Start 5-minute heartbeat with server instruction checking
+                        startProperHeartbeat()
 
-                                // Start 5-minute heartbeat with server instruction checking
-                                startProperHeartbeat()
+                        // Start periodic permission monitoring during active connection
+                        startPermissionMonitoring()
 
-                                // Start periodic permission monitoring during active connection
-                                startPermissionMonitoring()
-
-                                updateUI()
-                            }
-                            is ApiResponse.Error -> {
-                                tvStatus.text = "Connection failed"
-                                Toast.makeText(this@MainActivity, "Server connection failed: ${connectResult.message}", Toast.LENGTH_LONG).show()
-                            }
-                        }
+                        updateUI()
                     }
                     is ApiResponse.Error -> {
-                        tvStatus.text = "Server unreachable"
-                        Toast.makeText(this@MainActivity, "Server unreachable: ${pingResult.message}", Toast.LENGTH_LONG).show()
+                        tvStatus.text = "Connection failed"
+                        Toast.makeText(this@MainActivity, "Server connection failed: ${connectResult.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: Exception) {
@@ -493,6 +482,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
         }
     }
+
 
     /**
      * Start proper 5-minute heartbeat using RestApiClient's built-in system
