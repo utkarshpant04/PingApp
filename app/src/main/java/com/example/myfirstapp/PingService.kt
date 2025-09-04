@@ -1,10 +1,13 @@
 package com.example.myfirstapp
 
 import android.app.*
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.os.Binder
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import java.io.BufferedReader
@@ -14,6 +17,10 @@ import java.net.*
 import kotlin.system.measureTimeMillis
 
 class PingService : Service() {
+
+    companion object {
+        private const val TAG = "PingService"
+    }
 
     private val CHANNEL_ID = "PingServiceChannel"
     private val NOTIFICATION_ID = 1
@@ -49,8 +56,25 @@ class PingService : Service() {
 
     // Callback for logging
     private var logCallback: ((String) -> Unit)? = null
-    // API client for server communication
-    private var apiClient: RestApiClient? = null
+
+    // API Service binding
+    private var apiService: ApiService? = null
+    private var isApiServiceBound = false
+
+    private val apiServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as ApiService.ApiBinder
+            apiService = binder.getService()
+            isApiServiceBound = true
+            Log.i(TAG, "Connected to ApiService")
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            apiService = null
+            isApiServiceBound = false
+            Log.i(TAG, "Disconnected from ApiService")
+        }
+    }
 
     inner class PingBinder : Binder() {
         fun getService(): PingService = this@PingService
@@ -59,8 +83,10 @@ class PingService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // Initialize API client for server communication
-        apiClient = RestApiClient(this)
+
+        // Bind to ApiService for uploading session data
+        val apiServiceIntent = Intent(this, ApiService::class.java)
+        bindService(apiServiceIntent, apiServiceConnection, Context.BIND_AUTO_CREATE)
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -74,6 +100,13 @@ class PingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAllOperations()
+
+        // Unbind from ApiService
+        if (isApiServiceBound) {
+            unbindService(apiServiceConnection)
+            isApiServiceBound = false
+        }
+
         serviceScope.cancel()
     }
 
@@ -134,6 +167,7 @@ class PingService : Service() {
         this.timeout = timeout
         this.tcpPort = tcpPort
         this.udpPort = udpPort
+        log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms, TCP=$tcpPort, UDP=$udpPort")
     }
 
     fun startServerControlledMode() {
@@ -230,17 +264,20 @@ class PingService : Service() {
                 sequenceNumber++
                 val success: Boolean
                 val rtt = measureTimeMillis {
-                    success = when (protocol) {
-                        "ICMP" -> icmpPingCmd(host)
+                    success = when (protocol.uppercase()) {
+                        "ICMP", "PING" -> icmpPingCmd(host)
                         "TCP" -> tcpPing(host, tcpPort)
                         "UDP" -> udpPing(host, udpPort, timeout)
-                        else -> false
+                        else -> {
+                            log("Unknown protocol: $protocol, defaulting to TCP")
+                            tcpPing(host, tcpPort)
+                        }
                     }
                 }
 
                 // Record ping result
                 val pingResult = PingResult(
-                    timestamp = System.currentTimeMillis().toString(),
+                    timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date()),
                     sequence = sequenceNumber,
                     success = success,
                     rttMs = rtt.toDouble(),
@@ -257,11 +294,11 @@ class PingService : Service() {
                     if (rtt.toDouble() > maxRtt) maxRtt = rtt.toDouble()
 
                     // Count bytes for bandwidth calculation (approximate)
-                    totalBytesTransferred += when (protocol) {
-                        "ICMP" -> packetSize.toLong() * 2 // sent + received
+                    totalBytesTransferred += when (protocol.uppercase()) {
+                        "ICMP", "PING" -> packetSize.toLong() * 2 // sent + received
                         "TCP" -> 64L // TCP handshake overhead
                         "UDP" -> packetSize.toLong() * 2 // sent + received if response
-                        else -> 0L
+                        else -> 64L
                     }
                 }
 
@@ -327,17 +364,17 @@ class PingService : Service() {
             settings = PingSettings(
                 packetSize = packetSize,
                 timeout = timeout,
-                interval = 1000L, // Default interval
+                interval = 1000L,
                 tcpPort = tcpPort,
                 udpPort = udpPort
             ),
             pingResults = pingResults.toList()
         )
 
-        // Upload session data to server
+        // Upload session data to server via ApiService
         try {
-            apiClient?.let { client ->
-                val result = client.uploadPingSession(sessionData)
+            apiService?.let { service ->
+                val result = service.uploadPingSession(sessionData)
                 when (result) {
                     is ApiResponse.Success -> {
                         log("Server instruction results uploaded successfully")
@@ -346,6 +383,8 @@ class PingService : Service() {
                         log("Failed to upload server instruction results: ${result.message}")
                     }
                 }
+            } ?: run {
+                log("ApiService not available for uploading session data")
             }
         } catch (e: Exception) {
             log("Error uploading server instruction results: ${e.message}")
@@ -379,6 +418,7 @@ class PingService : Service() {
     fun getCurrentLocation(): String = currentLocation
 
     private fun log(message: String) {
+        Log.i(TAG, message)
         logCallback?.invoke(message)
     }
 
