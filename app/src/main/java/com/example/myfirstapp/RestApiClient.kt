@@ -429,7 +429,7 @@ class RestApiClient(private val context: Context) {
             readTimeout = READ_TIMEOUT
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "PingApp-Android-DynamicLocation/2.1")
+            setRequestProperty("User-Agent", "PingApp-Android-BackgroundLocation/2.2")
 
             if (method == "POST") {
                 doOutput = true
@@ -440,7 +440,7 @@ class RestApiClient(private val context: Context) {
 }
 
 /**
- * Data classes remain the same - no changes needed
+ * Data classes for API communication with enhanced location tracking
  */
 data class PingSessionData(
     val sessionId: String,

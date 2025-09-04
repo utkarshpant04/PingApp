@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationListener
@@ -33,6 +34,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private lateinit var locationManager: LocationManager
     private var currentLocation: Location? = null
     private val LOCATION_PERMISSION_REQUEST_CODE = 1001
+    private val BACKGROUND_LOCATION_PERMISSION_REQUEST_CODE = 1002
     private var locationPermissionGranted = false
     private var isLocationUpdatesActive = false
 
@@ -41,6 +43,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private var timeout = 1000
     private var tcpPort = 80
     private var udpPort = 5001
+
+    // Location sharing setting
+    private var enableLocationSharing = false
+    private lateinit var sharedPreferences: SharedPreferences
+    private val PREF_LOCATION_SHARING = "location_sharing_enabled"
 
     private var pingService: PingService? = null
     private var isServiceBound = false
@@ -68,6 +75,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
             }
 
+            // Update service with current location sharing setting
+            pingService?.updateLocationSharingSetting(enableLocationSharing)
+
             // Update UI based on service state
             updateUI()
         }
@@ -84,6 +94,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         val toolbar: androidx.appcompat.widget.Toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
+
+        // Initialize SharedPreferences for settings
+        sharedPreferences = getSharedPreferences("PingAppSettings", Context.MODE_PRIVATE)
+        enableLocationSharing = sharedPreferences.getBoolean(PREF_LOCATION_SHARING, false)
 
         btnConnect = findViewById(R.id.btnConnect)
         btnDisconnect = findViewById(R.id.btnDisconnect)
@@ -105,14 +119,19 @@ class MainActivity : AppCompatActivity(), LocationListener {
         // Initialize REST API client
         apiClient = RestApiClient(this)
 
-        // Request location permissions if not granted
-//        requestLocationPermissions()
+        // Only request location permissions if location sharing is enabled
+        if (enableLocationSharing) {
+            requestLocationPermissions()
+        }
 
         // Bind to the service
         val serviceIntent = Intent(this, PingService::class.java)
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
 
         updateUI()
+
+        // Log current location sharing setting
+        safeAppendToLog("Location sharing: ${if (enableLocationSharing) "Enabled" else "Disabled"}")
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -124,14 +143,18 @@ class MainActivity : AppCompatActivity(), LocationListener {
     override fun onResume() {
         super.onResume()
         // Check for permission changes when returning to the app
-        checkLocationPermissionStatus()
+        if (enableLocationSharing) {
+            checkLocationPermissionStatus()
+        }
         updateUI()
     }
 
     override fun onStart() {
         super.onStart()
         // Also check when app becomes visible
-        checkLocationPermissionStatus()
+        if (enableLocationSharing) {
+            checkLocationPermissionStatus()
+        }
     }
 
     /**
@@ -157,6 +180,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
      * Check current location permission status and restart location updates if needed
      */
     private fun checkLocationPermissionStatus() {
+        if (!enableLocationSharing) return
+
         try {
             val hasLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -198,7 +223,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             // Stop location updates safely
             stopLocationUpdates()
 
-            safeAppendToLog("Location permission revoked - location will show as Permission Denied")
+            safeAppendToLog("Location permission revoked - location will show as N/A")
 
             // Update service with new permission status - ONLY ONCE
             pingService?.updateLocationPermissionStatus(false)
@@ -221,7 +246,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         // Cancel existing monitoring job to avoid conflicts
         permissionMonitoringJob?.cancel()
 
-        if (isConnectedToServer) {
+        if (isConnectedToServer && enableLocationSharing) {
             permissionMonitoringJob = lifecycleScope.launch {
                 try {
                     while (isConnectedToServer && isActive) {
@@ -246,20 +271,56 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     private fun requestLocationPermissions() {
-        val hasLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-        locationPermissionGranted = hasLocationPermission
-
-        if (!hasLocationPermission) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
-                LOCATION_PERMISSION_REQUEST_CODE
-            )
-        } else {
-            startLocationUpdates()
+        if (!enableLocationSharing) {
+            safeAppendToLog("Location sharing disabled - skipping permission request")
+            return
         }
+
+        val hasFineLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarseLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasBackgroundLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+        locationPermissionGranted = hasFineLocation || hasCoarseLocation
+
+        when {
+            !locationPermissionGranted -> {
+                // First request foreground location permissions
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                    LOCATION_PERMISSION_REQUEST_CODE
+                )
+            }
+            locationPermissionGranted && !hasBackgroundLocation && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q -> {
+                // If foreground permissions granted but not background, explain and request background
+                showBackgroundLocationExplanation()
+            }
+            else -> {
+                // All permissions granted
+                startLocationUpdates()
+                safeAppendToLog("All location permissions granted - background location available")
+            }
+        }
+    }
+
+    private fun showBackgroundLocationExplanation() {
+        AlertDialog.Builder(this)
+            .setTitle("Background Location Permission")
+            .setMessage("To accurately track location during ping operations when the app is in the background, we need background location permission. This ensures precise location data is included with ping results even when you're not actively using the app.")
+            .setPositiveButton("Grant Permission") { _, _ ->
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    ActivityCompat.requestPermissions(
+                        this,
+                        arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                        BACKGROUND_LOCATION_PERMISSION_REQUEST_CODE
+                    )
+                }
+            }
+            .setNegativeButton("Skip") { _, _ ->
+                Toast.makeText(this, "Background location will be limited. Location accuracy may be reduced when app is backgrounded.", Toast.LENGTH_LONG).show()
+                startLocationUpdates()
+            }
+            .show()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
@@ -270,24 +331,50 @@ class MainActivity : AppCompatActivity(), LocationListener {
                     val permissionGranted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
                     locationPermissionGranted = permissionGranted
 
-                    if (permissionGranted) {
+                    if (permissionGranted && enableLocationSharing) {
                         startLocationUpdates()
-                        safeAppendToLog("Location permission granted - location tracking enabled")
+                        safeAppendToLog("Foreground location permission granted - location tracking enabled")
                         pingService?.updateLocationPermissionStatus(true)
+
+                        // Check if we should request background location
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                            val hasBackgroundLocation = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+                            if (!hasBackgroundLocation) {
+                                showBackgroundLocationExplanation()
+                            }
+                        }
                     } else {
                         Toast.makeText(this, "Location permission denied. Location will show as N/A", Toast.LENGTH_LONG).show()
-                        safeAppendToLog("Location permission denied - location will show as N/A")
+                        safeAppendToLog("Foreground location permission denied - location will show as N/A")
                         pingService?.updateLocationPermissionStatus(false)
                     }
                 } catch (e: Exception) {
-                    safeAppendToLog("Error processing permission result: ${e.message}")
+                    safeAppendToLog("Error processing foreground location permission result: ${e.message}")
+                }
+            }
+            BACKGROUND_LOCATION_PERMISSION_REQUEST_CODE -> {
+                try {
+                    val backgroundPermissionGranted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+
+                    if (backgroundPermissionGranted) {
+                        Toast.makeText(this, "Background location permission granted - full location tracking enabled", Toast.LENGTH_SHORT).show()
+                        safeAppendToLog("Background location permission granted - app can track location when backgrounded")
+                    } else {
+                        Toast.makeText(this, "Background location denied - location tracking will be limited when app is backgrounded", Toast.LENGTH_LONG).show()
+                        safeAppendToLog("Background location permission denied - location accuracy may be reduced in background")
+                    }
+
+                    // Start location updates regardless - we at least have foreground permission
+                    startLocationUpdates()
+                } catch (e: Exception) {
+                    safeAppendToLog("Error processing background location permission result: ${e.message}")
                 }
             }
         }
     }
 
     private fun startLocationUpdates() {
-        if (!locationPermissionGranted || isLocationUpdatesActive) return
+        if (!enableLocationSharing || !locationPermissionGranted || isLocationUpdatesActive) return
 
         try {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
@@ -359,6 +446,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
     // LocationListener methods
     override fun onLocationChanged(location: Location) {
         try {
+            // If location sharing is disabled, ignore location updates
+            if (!enableLocationSharing) return
+
             // If permission was already detected as revoked, ignore this callback
             if (!locationPermissionGranted) return
 
@@ -393,7 +483,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     override fun onProviderEnabled(provider: String) {
         try {
-            safeAppendToLog("Location provider enabled: $provider")
+            if (enableLocationSharing) {
+                safeAppendToLog("Location provider enabled: $provider")
+            }
         } catch (e: Exception) {
             // Handle silently
         }
@@ -401,25 +493,60 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     override fun onProviderDisabled(provider: String) {
         try {
-            safeAppendToLog("Location provider disabled: $provider")
+            if (enableLocationSharing) {
+                safeAppendToLog("Location provider disabled: $provider")
+            }
         } catch (e: Exception) {
             // Handle silently
         }
     }
 
+    /**
+     * Synchronize location with service for background accuracy
+     */
+    private fun syncLocationWithService() {
+        lifecycleScope.launch {
+            try {
+                // Get location from service (which handles background updates)
+                val serviceLocation = pingService?.getCurrentLocation() ?: "N/A"
+
+                // Update UI with service location if it's different from our local location
+                if (serviceLocation != getCurrentLocationString()) {
+                    safeAppendToLog("Using service location: $serviceLocation (app may be backgrounded)")
+                    updateUI()
+                }
+            } catch (e: Exception) {
+                safeAppendToLog("Error syncing location with service: ${e.message}")
+            }
+        }
+    }
+
     fun getCurrentLocationString(): String {
         try {
+            // If location sharing is disabled, always return N/A
+            if (!enableLocationSharing) {
+                return "N/A"
+            }
+
             // Always check permissions before returning location
             val hasLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                     ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
             return if (hasLocationPermission && locationPermissionGranted) {
+                // If we're connected to server, prefer service location (handles background better)
+                if (isConnectedToServer && pingService != null) {
+                    val serviceLocation = pingService?.getCurrentLocation() ?: "N/A"
+                    if (serviceLocation != "N/A") {
+                        return serviceLocation
+                    }
+                }
+
+                // Fallback to local location if service doesn't have location
                 currentLocation?.let {
                     "%.6f,%.6f".format(it.latitude, it.longitude)
                 } ?: "N/A"
             } else {
-                // Detected permission revocation here - handle async to avoid blocking
-                // But DON'T call service methods from this getter to avoid cascading calls
+                // Handle permission revocation detection
                 if (locationPermissionGranted && !hasLocationPermission) {
                     lifecycleScope.launch {
                         try {
@@ -433,11 +560,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         }
                     }
                 }
-                "Permission Denied"
+                "N/A"
             }
         } catch (e: Exception) {
             safeAppendToLog("Error getting location string: ${e.message}")
-            return "Error"
+            return "N/A"
         }
     }
 
@@ -446,7 +573,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         lifecycleScope.launch {
             try {
-                // Attempt to connect directly without a preliminary ping
                 tvStatus.text = "Connecting to server..."
                 val location = getCurrentLocationString()
                 val connectResult = apiClient.connectToServer(location)
@@ -458,7 +584,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
                         // Clear log and show connection info
-                        tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
+                        tvLog.text = "Connected to server successfully\nLocation: $location\nLocation sharing: ${if (enableLocationSharing) "Enabled" else "Disabled"}\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
 
                         // Start service for server-controlled operations
                         pingService?.startServerControlledMode()
@@ -468,6 +594,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
                         // Start periodic permission monitoring during active connection
                         startPermissionMonitoring()
+
+                        // Sync with service location for background accuracy
+                        syncLocationWithService()
 
                         updateUI()
                     }
@@ -482,7 +611,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
         }
     }
-
 
     /**
      * Start proper 5-minute heartbeat using RestApiClient's built-in system
@@ -604,11 +732,13 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val etTimeout = dialogView.findViewById<EditText>(R.id.etTimeout)
         val etTcpPort = dialogView.findViewById<EditText>(R.id.etTcpPort)
         val etUdpPort = dialogView.findViewById<EditText>(R.id.etUdpPort)
+        val switchLocationSharing = dialogView.findViewById<Switch>(R.id.switchLocationSharing)
 
         etPacketSize.setText(packetSize.toString())
         etTimeout.setText(timeout.toString())
         etTcpPort.setText(tcpPort.toString())
         etUdpPort.setText(udpPort.toString())
+        switchLocationSharing.isChecked = enableLocationSharing
 
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.settings_title))
@@ -618,6 +748,36 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 timeout = etTimeout.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: timeout
                 tcpPort = etTcpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: tcpPort
                 udpPort = etUdpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: udpPort
+
+                val newLocationSharingSetting = switchLocationSharing.isChecked
+
+                // Handle location sharing setting change
+                if (newLocationSharingSetting != enableLocationSharing) {
+                    enableLocationSharing = newLocationSharingSetting
+
+                    // Save setting to SharedPreferences
+                    sharedPreferences.edit()
+                        .putBoolean(PREF_LOCATION_SHARING, enableLocationSharing)
+                        .apply()
+
+                    // Update service with new setting
+                    pingService?.updateLocationSharingSetting(enableLocationSharing)
+
+                    if (enableLocationSharing) {
+                        safeAppendToLog("Location sharing enabled - requesting permissions")
+                        requestLocationPermissions()
+                    } else {
+                        safeAppendToLog("Location sharing disabled - stopping location updates")
+                        stopLocationUpdates()
+                        locationPermissionGranted = false
+                        currentLocation = null
+                        pingService?.updateLocationPermissionStatus(false)
+                    }
+
+                    Toast.makeText(this,
+                        "Location sharing ${if (enableLocationSharing) "enabled" else "disabled"}",
+                        Toast.LENGTH_SHORT).show()
+                }
 
                 // Update service settings
                 pingService?.updateSettings(packetSize, timeout, tcpPort, udpPort)
@@ -641,7 +801,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
                             if (isConnectedToServer && !isPingingActive) {
                                 val heartbeatStatus = if (apiClient.isHeartbeatRunning()) " - 5min heartbeat active" else ""
-                                val locationStatus = if (locationPermissionGranted) " | Location: ${getCurrentLocationString()}" else " | Location: Permission Denied"
+                                val locationStatus = if (enableLocationSharing) {
+                                    if (locationPermissionGranted) " | Location: ${getCurrentLocationString()}" else " | Location: N/A"
+                                } else {
+                                    " | Location: Disabled"
+                                }
                                 tvStatus.text = "Connected - Awaiting server instructions$heartbeatStatus$locationStatus"
                             } else if (isConnectedToServer && isPingingActive) {
                                 tvStatus.text = "Connected - Executing ping instruction"

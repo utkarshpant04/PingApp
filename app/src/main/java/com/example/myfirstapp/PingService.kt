@@ -5,7 +5,11 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Binder
+import android.os.Bundle
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -16,7 +20,7 @@ import java.io.InputStreamReader
 import java.net.*
 import kotlin.system.measureTimeMillis
 
-class PingService : Service() {
+class PingService : Service(), LocationListener {
 
     private val CHANNEL_ID = "PingServiceChannel"
     private val NOTIFICATION_ID = 1
@@ -29,9 +33,13 @@ class PingService : Service() {
     private var isInServerControlledMode = false
     private var isExecutingPingInstruction = false
 
-    // Location tracking
+    // Enhanced location tracking for background operation
+    private lateinit var locationManager: LocationManager
     private var locationPermissionGranted = false
     private var currentLocation = "N/A"
+    private var enableLocationSharing = false
+    private var isLocationUpdatesActive = false
+    private var lastKnownLocation: Location? = null
 
     // Session tracking
     private var packetsSent = 0
@@ -58,6 +66,9 @@ class PingService : Service() {
     // API client for server communication
     private var apiClient: RestApiClient? = null
 
+    // Background location monitoring job
+    private var locationMonitoringJob: Job? = null
+
     inner class PingBinder : Binder() {
         fun getService(): PingService = this@PingService
     }
@@ -67,6 +78,8 @@ class PingService : Service() {
         createNotificationChannel()
         // Initialize API client for server communication
         apiClient = RestApiClient(this)
+        // Initialize location manager for service-level location tracking
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -80,6 +93,7 @@ class PingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAllOperations()
+        stopServiceLocationUpdates()
         serviceScope.cancel()
     }
 
@@ -113,23 +127,222 @@ class PingService : Service() {
             .build()
     }
 
+    /**
+     * Enhanced location verification that works in background
+     */
     private fun getVerifiedCurrentLocation(): String {
+        // If location sharing is disabled, always return N/A
+        if (!enableLocationSharing) {
+            return "N/A"
+        }
+
         // Check the current permission status directly from the service context
         val hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-        // If permission state has changed since the last update from Activity, log it.
+        // If permission state has changed since the last update, log it and update
         if (hasPermission != locationPermissionGranted) {
             locationPermissionGranted = hasPermission
             log("Location permission state changed (detected by service): ${if (hasPermission) "granted" else "revoked"}")
+
+            // If permission was revoked, stop location updates
+            if (!hasPermission) {
+                stopServiceLocationUpdates()
+                currentLocation = "N/A"
+                lastKnownLocation = null
+            } else if (enableLocationSharing && isInServerControlledMode) {
+                // Permission was granted, restart location updates if in server mode
+                startServiceLocationUpdates()
+            }
         }
 
-        return if (locationPermissionGranted) {
-            // If we have permission, use the location string provided by the Activity.
+        return if (locationPermissionGranted && enableLocationSharing) {
+            // Use the most recent location we have
             currentLocation
         } else {
-            // If we don't have permission, override and return "Permission Denied".
-            "Permission Denied"
+            "N/A"
+        }
+    }
+
+    /**
+     * Start location updates at service level for background operation
+     */
+    private fun startServiceLocationUpdates() {
+        if (!enableLocationSharing || !locationPermissionGranted || isLocationUpdatesActive) {
+            return
+        }
+
+        try {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+
+                // Stop any existing updates first
+                stopServiceLocationUpdates()
+
+                // Request location updates from available providers
+                if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        15000L, // 15 seconds (longer interval for background)
+                        20f,    // 20 meters
+                        this
+                    )
+                }
+
+                if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        15000L,
+                        20f,
+                        this
+                    )
+                }
+
+                isLocationUpdatesActive = true
+
+                // Get last known location as initial value
+                val lastKnownGPS = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                val lastKnownNetwork = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+
+                lastKnownLocation = when {
+                    lastKnownGPS != null -> lastKnownGPS
+                    lastKnownNetwork != null -> lastKnownNetwork
+                    else -> null
+                }
+
+                updateLocationString()
+
+                log("Service-level location updates started - current location: $currentLocation")
+
+                // Start background monitoring for permission changes
+                startLocationMonitoring()
+
+            }
+        } catch (e: SecurityException) {
+            log("Location permission was revoked during service startup")
+            handleLocationPermissionRevocation()
+        } catch (e: Exception) {
+            log("Error starting service location updates: ${e.message}")
+        }
+    }
+
+    /**
+     * Stop location updates at service level
+     */
+    private fun stopServiceLocationUpdates() {
+        try {
+            if (isLocationUpdatesActive) {
+                locationManager.removeUpdates(this)
+                isLocationUpdatesActive = false
+                log("Service-level location updates stopped")
+            }
+        } catch (e: SecurityException) {
+            // Permission was already revoked - this is expected
+        } catch (e: Exception) {
+            log("Error stopping service location updates: ${e.message}")
+        }
+    }
+
+    /**
+     * Monitor location permission changes while in background
+     */
+    private fun startLocationMonitoring() {
+        locationMonitoringJob?.cancel()
+
+        if (isInServerControlledMode && enableLocationSharing) {
+            locationMonitoringJob = serviceScope.launch {
+                try {
+                    while (isInServerControlledMode && isActive) {
+                        delay(60000) // Check every minute during background operation
+
+                        if (isActive && locationPermissionGranted) {
+                            val hasLocationPermission = ContextCompat.checkSelfPermission(this@PingService, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                    ContextCompat.checkSelfPermission(this@PingService, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+                            if (!hasLocationPermission) {
+                                handleLocationPermissionRevocation()
+                            }
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    // Expected when job is cancelled
+                } catch (e: Exception) {
+                    log("Error in background location monitoring: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Handle location permission revocation at service level
+     */
+    private fun handleLocationPermissionRevocation() {
+        try {
+            locationPermissionGranted = false
+            currentLocation = "N/A"
+            lastKnownLocation = null
+            isLocationUpdatesActive = false
+
+            stopServiceLocationUpdates()
+            log("Location permission revoked - service location tracking stopped")
+        } catch (e: Exception) {
+            log("Error handling location permission revocation: ${e.message}")
+        }
+    }
+
+    /**
+     * Update location string from Location object
+     */
+    private fun updateLocationString() {
+        if (!enableLocationSharing || !locationPermissionGranted) {
+            currentLocation = "N/A"
+            return
+        }
+
+        currentLocation = lastKnownLocation?.let {
+            "%.6f,%.6f".format(it.latitude, it.longitude)
+        } ?: "N/A"
+    }
+
+    // LocationListener implementation for service-level location updates
+    override fun onLocationChanged(location: Location) {
+        try {
+            if (!enableLocationSharing || !locationPermissionGranted) {
+                return
+            }
+
+            // Verify permission before processing
+            val hasLocationPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+            if (hasLocationPermission) {
+                lastKnownLocation = location
+                updateLocationString()
+
+                // Log location update during active pinging
+                if (isExecutingPingInstruction) {
+                    log("Background location updated: $currentLocation")
+                }
+            } else {
+                // Permission was revoked
+                handleLocationPermissionRevocation()
+            }
+        } catch (e: Exception) {
+            log("Error processing background location change: ${e.message}")
+        }
+    }
+
+    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+
+    override fun onProviderEnabled(provider: String) {
+        if (enableLocationSharing) {
+            log("Location provider enabled: $provider")
+        }
+    }
+
+    override fun onProviderDisabled(provider: String) {
+        if (enableLocationSharing) {
+            log("Location provider disabled: $provider")
         }
     }
 
@@ -141,7 +354,7 @@ class PingService : Service() {
         } else 0
 
         val bandwidth = calculateBandwidth()
-        val verifiedLocation = getVerifiedCurrentLocation() // Always use verified location
+        val verifiedLocation = getVerifiedCurrentLocation()
 
         val notification = createNotification(
             getString(R.string.executing_server_instruction, currentHost, currentProtocol),
@@ -164,31 +377,67 @@ class PingService : Service() {
     }
 
     /**
-     * Update location permission status
+     * Update location sharing setting - controls whether actual location or N/A is used
      */
-    fun updateLocationPermissionStatus(granted: Boolean) {
-        locationPermissionGranted = granted
-        if (!granted) {
-            currentLocation = "Permission Denied"
+    fun updateLocationSharingSetting(enabled: Boolean) {
+        val wasEnabled = enableLocationSharing
+        enableLocationSharing = enabled
+
+        if (!enabled) {
+            currentLocation = "N/A"
+            stopServiceLocationUpdates()
+        } else if (!wasEnabled && enabled && isInServerControlledMode && locationPermissionGranted) {
+            // Location sharing was just enabled, start updates if in server mode
+            startServiceLocationUpdates()
         }
-        log("Location permission updated from UI: ${if (granted) "granted" else "denied"}")
+
+        log("Location sharing setting updated: ${if (enabled) "enabled" else "disabled"}")
     }
 
     /**
-     * Update current location from MainActivity
+     * Update location permission status from MainActivity
+     */
+    fun updateLocationPermissionStatus(granted: Boolean) {
+        val wasGranted = locationPermissionGranted
+        locationPermissionGranted = granted
+
+        if (!granted || !enableLocationSharing) {
+            currentLocation = "N/A"
+            stopServiceLocationUpdates()
+        } else if (!wasGranted && granted && enableLocationSharing && isInServerControlledMode) {
+            // Permission was just granted, start updates if in server mode
+            startServiceLocationUpdates()
+        }
+
+        log("Location permission updated from UI: ${if (granted) "granted" else "denied"} (sharing: ${if (enableLocationSharing) "enabled" else "disabled"})")
+    }
+
+    /**
+     * Update current location from MainActivity - fallback for UI updates
      */
     fun updateCurrentLocation(location: String) {
-        if (locationPermissionGranted) {
-            currentLocation = location
-            // Update notification if actively pinging
-            if (isExecutingPingInstruction) {
-                updateNotification()
+        if (locationPermissionGranted && enableLocationSharing) {
+            // Only update if we don't have service-level location updates running
+            // or if the provided location is more recent
+            if (!isLocationUpdatesActive || location != "N/A") {
+                currentLocation = location
+
+                // Update notification if actively pinging
+                if (isExecutingPingInstruction) {
+                    updateNotification()
+                }
             }
         }
     }
 
     fun startServerControlledMode() {
         isInServerControlledMode = true
+
+        // Start service-level location updates if location sharing is enabled and permitted
+        if (enableLocationSharing && locationPermissionGranted) {
+            startServiceLocationUpdates()
+        }
+
         val verifiedLocation = getVerifiedCurrentLocation()
 
         // Start foreground service for server-controlled mode
@@ -198,11 +447,15 @@ class PingService : Service() {
         )
         startForeground(NOTIFICATION_ID, notification)
 
-        log("Entered server-controlled mode - awaiting instructions | Location permission: ${if (locationPermissionGranted) "granted" else "denied"}")
+        log("Entered server-controlled mode with background location tracking - Location sharing: ${if (enableLocationSharing) "enabled" else "disabled"} | Permission: ${if (locationPermissionGranted) "granted" else "denied"}")
     }
 
     fun stopServerControlledMode() {
         isInServerControlledMode = false
+
+        // Stop location monitoring and updates
+        locationMonitoringJob?.cancel()
+        stopServiceLocationUpdates()
 
         // Stop any ongoing ping instruction
         serviceScope.launch {
@@ -229,13 +482,13 @@ class PingService : Service() {
             return
         }
 
-        // Update current location with a verified check
-        currentLocation = getVerifiedCurrentLocation()
+        // Get verified current location (this will be the most accurate available)
+        val verifiedLocation = getVerifiedCurrentLocation()
 
         // Cancel any existing ping job
         serviceScope.launch {
             pingJob?.cancelAndJoin()
-            startPingInstruction(host, protocol, interval, durationSeconds, packetSize, timeout, tcpPort, udpPort, currentLocation)
+            startPingInstruction(host, protocol, interval, durationSeconds, packetSize, timeout, tcpPort, udpPort, verifiedLocation)
         }
     }
 
@@ -246,7 +499,6 @@ class PingService : Service() {
         // Initialize session data
         currentHost = host
         currentProtocol = protocol
-        currentLocation = location
         startLocation = location
         packetsSent = 0
         packetsReceived = 0
@@ -293,14 +545,14 @@ class PingService : Service() {
                     }
                 }
 
-                // Record ping result with a verified current location
-                val verifiedLocation = getVerifiedCurrentLocation()
+                // Record ping result with current verified location
+                val currentVerifiedLocation = getVerifiedCurrentLocation()
                 val pingResult = PingResult(
                     timestamp = System.currentTimeMillis().toString(),
                     sequence = sequenceNumber,
                     success = success,
                     rttMs = rtt.toDouble(),
-                    location = verifiedLocation, // Use verified location for each data point
+                    location = currentVerifiedLocation, // Always use most current verified location
                     errorMessage = if (!success) "Request timed out" else ""
                 )
                 pingResults.add(pingResult)
@@ -327,15 +579,14 @@ class PingService : Service() {
 
                 val bandwidth = calculateBandwidth()
                 val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
-                val logLocation = getVerifiedCurrentLocation() // Also use verified location for logging
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $logLocation | Remaining: ${remainingTime}s")
+                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $currentVerifiedLocation | Remaining: ${remainingTime}s")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $logLocation | Remaining: ${remainingTime}s")
+                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Loc: $currentVerifiedLocation | Remaining: ${remainingTime}s")
                 }
 
-                // Update notification every 5 pings or on first ping to show current location
+                // Update notification every 5 pings to show current location
                 if (packetsSent == 1 || packetsSent % 5 == 0) {
                     updateNotification()
                 }
@@ -353,7 +604,7 @@ class PingService : Service() {
 
         val endTime = System.currentTimeMillis()
         val duration = (endTime - startTime) / 1000 // seconds
-        val finalLocation = getVerifiedCurrentLocation() // Get final verified location
+        val finalLocation = getVerifiedCurrentLocation()
 
         val loss = if (packetsSent > 0) {
             ((packetsSent - packetsReceived) * 100.0) / packetsSent
@@ -362,7 +613,7 @@ class PingService : Service() {
         val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
         val bandwidth = calculateBandwidth()
 
-        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Start Location: $startLocation | Final Location: $finalLocation")
+        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Start Location: $startLocation | Final Location: $finalLocation | Background location tracking: ${if (isLocationUpdatesActive) "active" else "inactive"}")
 
         // Prepare session data for server upload
         val sessionData = PingSessionData(
@@ -385,7 +636,7 @@ class PingService : Service() {
             settings = PingSettings(
                 packetSize = packetSize,
                 timeout = timeout,
-                interval = 1000L, // Default interval
+                interval = 1000L,
                 tcpPort = tcpPort,
                 udpPort = udpPort
             ),
@@ -398,7 +649,7 @@ class PingService : Service() {
                 val result = client.uploadPingSession(sessionData)
                 when (result) {
                     is ApiResponse.Success -> {
-                        log("Server instruction results uploaded successfully (with location changes)")
+                        log("Server instruction results uploaded successfully (background location tracking enabled)")
                     }
                     is ApiResponse.Error -> {
                         log("Failed to upload server instruction results: ${result.message}")
@@ -426,6 +677,10 @@ class PingService : Service() {
             pingJob = null
             isExecutingPingInstruction = false
             isInServerControlledMode = false
+
+            // Stop location monitoring and updates
+            locationMonitoringJob?.cancel()
+            stopServiceLocationUpdates()
 
             // Stop foreground service
             stopForeground(true)
@@ -470,39 +725,39 @@ class PingService : Service() {
             val output = reader.readText()
             val exitCode = process.waitFor()
             exitCode == 0 && output.contains("bytes from")
-        } catch (e: Exception) {
+        }
+        catch (e: Exception) {
             false
         }
     }
-
-    private fun tcpPing(host: String, port: Int): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), timeout)
-                true
+        private fun tcpPing(host: String, port: Int): Boolean {
+            return try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(host, port), timeout)
+                    true
+                }
+            } catch (e: IOException) {
+                false
             }
-        } catch (e: IOException) {
-            false
         }
-    }
 
-    private fun udpPing(host: String, port: Int, timeout: Int): Boolean {
-        return try {
-            DatagramSocket().use { socket ->
-                socket.soTimeout = timeout
-                val sendData = ByteArray(packetSize) { 'A'.code.toByte() }
-                val packet = DatagramPacket(sendData, sendData.size, InetAddress.getByName(host), port)
-                socket.send(packet)
+        private fun udpPing(host: String, port: Int, timeout: Int): Boolean {
+            return try {
+                DatagramSocket().use { socket ->
+                    socket.soTimeout = timeout
+                    val sendData = ByteArray(packetSize) { 'A'.code.toByte() }
+                    val packet = DatagramPacket(sendData, sendData.size, InetAddress.getByName(host), port)
+                    socket.send(packet)
 
-                val buffer = ByteArray(1024)
-                val response = DatagramPacket(buffer, buffer.size)
-                socket.receive(response)
-                true
+                    val buffer = ByteArray(1024)
+                    val response = DatagramPacket(buffer, buffer.size)
+                    socket.receive(response)
+                    true
+                }
+            } catch (e: SocketTimeoutException) {
+                false
+            } catch (e: IOException) {
+                false
             }
-        } catch (e: SocketTimeoutException) {
-            false
-        } catch (e: IOException) {
-            false
         }
     }
-}
