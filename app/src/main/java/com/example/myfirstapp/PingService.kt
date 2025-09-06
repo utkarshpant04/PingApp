@@ -54,8 +54,9 @@ class PingService : Service() {
     private var tcpPort = 80
     private var udpPort = 5001
 
-    // Callback for logging
+    // Callbacks
     private var logCallback: ((String) -> Unit)? = null
+    private var locationCallback: (() -> String)? = null
 
     // API Service binding
     private var apiService: ApiService? = null
@@ -162,6 +163,10 @@ class PingService : Service() {
         logCallback = callback
     }
 
+    fun setLocationCallback(callback: () -> String) {
+        locationCallback = callback
+    }
+
     fun updateSettings(packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int) {
         this.packetSize = packetSize
         this.timeout = timeout
@@ -262,6 +267,11 @@ class PingService : Service() {
             while (isActive && System.currentTimeMillis() < endTime && isExecutingPingInstruction) {
                 packetsSent++
                 sequenceNumber++
+
+                // Get current location for this ping
+                val currentLoc = locationCallback?.invoke() ?: location
+                currentLocation = currentLoc
+
                 val success: Boolean
                 val rtt = measureTimeMillis {
                     success = when (protocol.uppercase()) {
@@ -281,7 +291,7 @@ class PingService : Service() {
                     sequence = sequenceNumber,
                     success = success,
                     rttMs = rtt.toDouble(),
-                    location = location,
+                    location = currentLoc,
                     errorMessage = if (!success) "Request timed out" else ""
                 )
                 pingResults.add(pingResult)
@@ -310,9 +320,9 @@ class PingService : Service() {
                 val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
+                    log("Reply from $host: time=${rtt}ms | Loc: $currentLoc | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 } else {
-                    log("Request timed out | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
+                    log("Request timed out | Loc: $currentLoc | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 }
 
                 // Update notification every 5 pings or on first ping
@@ -341,7 +351,11 @@ class PingService : Service() {
         val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
         val bandwidth = calculateBandwidth()
 
-        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $currentLocation")
+        // Get final location
+        val finalLocation = locationCallback?.invoke() ?: currentLocation
+        currentLocation = finalLocation
+
+        log("Server ping instruction completed | Final stats - Sent: $packetsSent, Received: $packetsReceived, Loss: ${loss.toInt()}%, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $finalLocation")
 
         // Prepare session data for server upload
         val sessionData = PingSessionData(
@@ -360,7 +374,7 @@ class PingService : Service() {
             totalBytes = totalBytesTransferred,
             avgBandwidthBps = bandwidth,
             startLocation = startLocation,
-            endLocation = currentLocation,
+            endLocation = finalLocation,
             settings = PingSettings(
                 packetSize = packetSize,
                 timeout = timeout,

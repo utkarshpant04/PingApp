@@ -31,8 +31,8 @@ class ApiService : Service() {
         private const val SERVER_BASE_URL = "http://10.0.2.2:8080/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
-        private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 1 minute
-        private const val RECONNECT_INTERVAL_MS = 2 * 60 * 1000L // 5 minutes
+        private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
+        private const val RECONNECT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
         private const val MAX_FAILED_UPLOADS = 50 // Maximum number of failed uploads to store
 
         // Notification constants
@@ -71,8 +71,9 @@ class ApiService : Service() {
     // Failed upload queue - thread-safe
     private val failedUploadQueue = ConcurrentLinkedQueue<FailedUploadItem>()
 
-    // Callback for status updates
+    // Callbacks
     private var statusCallback: ((String, String) -> Unit)? = null
+    private var locationCallback: (() -> String)? = null
 
     // Notification manager
     private lateinit var notificationManager: NotificationManagerCompat
@@ -168,8 +169,8 @@ class ApiService : Service() {
 
         val status = statusOverride ?: when {
             isInReconnectMode -> "Reconnecting...$queueStatus"
-            isConnectedToServer && isHeartbeatActive -> "Connected – Heartbeat Active$queueStatus"
-            isConnectedToServer -> "Connected – Heartbeat Stopped$queueStatus"
+            isConnectedToServer && isHeartbeatActive -> "Connected — Heartbeat Active$queueStatus"
+            isConnectedToServer -> "Connected — Heartbeat Stopped$queueStatus"
             else -> "Starting…$queueStatus"
         }
 
@@ -274,6 +275,13 @@ class ApiService : Service() {
     }
 
     /**
+     * Set callback for location updates
+     */
+    fun setLocationCallback(callback: () -> String) {
+        locationCallback = callback
+    }
+
+    /**
      * Get connection status
      */
     fun isConnected(): Boolean = isConnectedToServer
@@ -328,6 +336,9 @@ class ApiService : Service() {
     suspend fun connectToServer(location: String = "N/A"): ApiResponse {
         return withContext(Dispatchers.IO) {
             if (!isNetworkAvailable()) return@withContext ApiResponse.Error(-2, "No network")
+
+            // Use location callback if available, otherwise use provided location
+            val currentLocation = locationCallback?.invoke() ?: location
             val url = URL("$SERVER_BASE_URL/connect")
 
             try {
@@ -339,7 +350,7 @@ class ApiService : Service() {
                     put("app_version", "2.0.0")
                     put("device_model", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("android_version", Build.VERSION.RELEASE)
-                    put("location", location)
+                    put("location", currentLocation)
                     put("timestamp", System.currentTimeMillis())
                 }
 
@@ -362,7 +373,7 @@ class ApiService : Service() {
                     clientId = responseJson.optString("client_id")
                     isConnectedToServer = true
                     isInReconnectMode = false
-                    lastLocation = location
+                    lastLocation = currentLocation
 
                     Log.i(TAG, "Connected to server with client_id: $clientId")
                     statusCallback?.invoke("connected", "Connected to server successfully")
@@ -399,8 +410,11 @@ class ApiService : Service() {
                     // Stop heartbeat first
                     stopHeartbeat()
 
+                    // Use location callback if available, otherwise use provided location
+                    val currentLocation = locationCallback?.invoke() ?: location
+
                     // Send final heartbeat to notify server of disconnection
-                    sendHeartbeatAndCheckInstructions("disconnected", location)
+                    sendHeartbeatAndCheckInstructions("disconnected", currentLocation)
 
                     isConnectedToServer = false
                     isInReconnectMode = false

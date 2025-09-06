@@ -96,5 +96,12 @@
             android:layout_weight="1"
             android:inputType="number"/>
     </LinearLayout>
-
+    <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/swLocationEnabled"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Send Location Data"
+        android:checked="true"
+        android:paddingTop="16dp"
+        android:paddingBottom="16dp"/>
 </LinearLayout>

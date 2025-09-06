@@ -21,6 +21,8 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
+import androidx.appcompat.widget.SwitchCompat
+import androidx.core.content.edit
 
 class MainActivity : AppCompatActivity(), LocationListener {
 
@@ -36,11 +38,19 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private val LOCATION_PERMISSION_REQUEST_CODE = 1001
     private val NOTIFICATION_PERMISSION_REQUEST_CODE = 1002
 
+    // Background location permission for API 29+
+    private val BACKGROUND_LOCATION_REQUEST_CODE = 1003
+
     // Configurable defaults for ping settings
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
     private var udpPort = 5001
+
+    // New location toggle variables and SharedPreferences
+    private val PREFS_NAME = "MyPrefs"
+    private val PREF_LOCATION_ENABLED = "location_enabled"
+    private var isLocationEnabled = true
 
     // Services
     private var pingService: PingService? = null
@@ -66,6 +76,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
                     }
                 }
             }
+
+            // Provide location callback to ping service
+            pingService?.setLocationCallback { getCurrentLocationString() }
 
             updateUI()
         }
@@ -96,6 +109,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
             }
 
+            // Provide location callback to api service
+            apiService?.setLocationCallback { getCurrentLocationString() }
+
             updateUI()
         }
 
@@ -120,6 +136,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         btnConnect.setOnClickListener { connectToServerAndStartHeartbeat() }
         btnDisconnect.setOnClickListener { disconnectFromServer() }
+
+        // Load location setting from SharedPreferences
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        isLocationEnabled = prefs.getBoolean(PREF_LOCATION_ENABLED, true)
 
         // Initialize location manager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -148,6 +168,17 @@ class MainActivity : AppCompatActivity(), LocationListener {
             permissionsToRequest.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
 
+        // Background location permission (API 29+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                // Only request background location if we have foreground location permission
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    permissionsToRequest.add(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                }
+            }
+        }
+
         // Notification permission (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -171,6 +202,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         when (requestCode) {
             LOCATION_PERMISSION_REQUEST_CODE -> {
                 var locationPermissionGranted = false
+                var backgroundLocationPermissionGranted = false
                 var notificationPermissionGranted = true // Default true for older Android versions
 
                 for (i in permissions.indices) {
@@ -181,6 +213,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
                                 locationPermissionGranted = true
                             }
                         }
+                        Manifest.permission.ACCESS_BACKGROUND_LOCATION -> {
+                            backgroundLocationPermissionGranted = grantResults[i] == PackageManager.PERMISSION_GRANTED
+                        }
                         Manifest.permission.POST_NOTIFICATIONS -> {
                             notificationPermissionGranted = grantResults[i] == PackageManager.PERMISSION_GRANTED
                         }
@@ -189,12 +224,39 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
                 if (locationPermissionGranted) {
                     startLocationUpdates()
+
+                    // If foreground location was granted but background wasn't, ask for background
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !backgroundLocationPermissionGranted) {
+                        // Request background location separately with explanation
+                        AlertDialog.Builder(this)
+                            .setTitle("Background Location Access")
+                            .setMessage("To track location during ping operations when the app is in background, please grant 'Allow all the time' location permission in the next dialog.")
+                            .setPositiveButton("OK") { _, _ ->
+                                ActivityCompat.requestPermissions(
+                                    this,
+                                    arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                                    BACKGROUND_LOCATION_REQUEST_CODE
+                                )
+                            }
+                            .setNegativeButton("Skip") { _, _ ->
+                                Toast.makeText(this, "Background location tracking will be limited", Toast.LENGTH_LONG).show()
+                            }
+                            .show()
+                    }
                 } else {
                     Toast.makeText(this, "Location permission denied. Location will show as N/A", Toast.LENGTH_LONG).show()
                 }
 
                 if (!notificationPermissionGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     Toast.makeText(this, "Notification permission denied. You won't receive background notifications.", Toast.LENGTH_LONG).show()
+                }
+            }
+            BACKGROUND_LOCATION_REQUEST_CODE -> {
+                val backgroundGranted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                if (backgroundGranted) {
+                    Toast.makeText(this, "Background location access granted", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Background location access denied. Location tracking will be limited when app is backgrounded.", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -205,12 +267,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
 
             try {
-                // Request location updates from both GPS and Network providers
+                // Request location updates from both GPS and Network providers with more frequent updates
                 if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     locationManager.requestLocationUpdates(
                         LocationManager.GPS_PROVIDER,
-                        10000L, // 10 seconds
-                        10f,    // 10 meters
+                        5000L, // 5 seconds for more frequent updates
+                        5f,    // 5 meters
                         this
                     )
                 }
@@ -218,8 +280,18 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     locationManager.requestLocationUpdates(
                         LocationManager.NETWORK_PROVIDER,
-                        10000L,
-                        10f,
+                        5000L, // 5 seconds
+                        5f,    // 5 meters
+                        this
+                    )
+                }
+
+                // Also request passive location updates to catch location changes from other apps
+                if (locationManager.isProviderEnabled(LocationManager.PASSIVE_PROVIDER)) {
+                    locationManager.requestLocationUpdates(
+                        LocationManager.PASSIVE_PROVIDER,
+                        1000L, // 1 second
+                        0f,    // Any movement
                         this
                     )
                 }
@@ -229,9 +301,15 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 val lastKnownNetwork = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
 
                 currentLocation = when {
+                    lastKnownGPS != null && (System.currentTimeMillis() - lastKnownGPS.time) < 5 * 60 * 1000 -> lastKnownGPS // GPS location less than 5 minutes old
+                    lastKnownNetwork != null && (System.currentTimeMillis() - lastKnownNetwork.time) < 10 * 60 * 1000 -> lastKnownNetwork // Network location less than 10 minutes old
                     lastKnownGPS != null -> lastKnownGPS
                     lastKnownNetwork != null -> lastKnownNetwork
                     else -> null
+                }
+
+                if (currentLocation != null) {
+                    tvLog.append("Initial location: ${getCurrentLocationString()}\n")
                 }
 
             } catch (e: SecurityException) {
@@ -242,17 +320,86 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     // LocationListener methods
     override fun onLocationChanged(location: Location) {
-        currentLocation = location
+        // Only update if the new location is significantly better
+        if (isBetterLocation(location, currentLocation)) {
+            val previousLocation = currentLocation?.let { "%.6f,%.6f".format(it.latitude, it.longitude) } ?: "N/A"
+            currentLocation = location
+            val newLocationString = getCurrentLocationString()
+
+            // Log location change
+//            tvLog.append("Location updated: $newLocationString (was: $previousLocation)\n")
+
+            // Scroll to bottom
+            tvLog.layout?.let { layout ->
+                val scrollAmount = layout.getLineTop(tvLog.lineCount)
+                if (scrollAmount > tvLog.height) {
+                    tvLog.scrollTo(0, scrollAmount - tvLog.height)
+                }
+            }
+        }
     }
 
     override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-    override fun onProviderEnabled(provider: String) {}
-    override fun onProviderDisabled(provider: String) {}
+    override fun onProviderEnabled(provider: String) {
+        tvLog.append("Location provider enabled: $provider\n")
+    }
+    override fun onProviderDisabled(provider: String) {
+        tvLog.append("Location provider disabled: $provider\n")
+    }
 
+    /**
+     * Determines whether one location reading is better than the current location fix
+     */
+    private fun isBetterLocation(location: Location, currentBestLocation: Location?): Boolean {
+        if (currentBestLocation == null) {
+            // A new location is always better than no location
+            return true
+        }
+
+        // Check whether the new location fix is newer or older
+        val timeDelta = location.time - currentBestLocation.time
+        val isSignificantlyNewer = timeDelta > 2 * 60 * 1000 // 2 minutes
+        val isSignificantlyOlder = timeDelta < -2 * 60 * 1000
+        val isNewer = timeDelta > 0
+
+        // If it's been more than two minutes since the current location, use the new location
+        // because the user has likely moved
+        if (isSignificantlyNewer) {
+            return true
+            // If the new location is more than two minutes older, it must be worse
+        } else if (isSignificantlyOlder) {
+            return false
+        }
+
+        // Check whether the new location fix is more or less accurate
+        val accuracyDelta = (location.accuracy - currentBestLocation.accuracy).toInt()
+        val isLessAccurate = accuracyDelta > 0
+        val isMoreAccurate = accuracyDelta < 0
+        val isSignificantlyLessAccurate = accuracyDelta > 200
+
+        // Check if the old and new location are from the same provider
+        val isFromSameProvider = location.provider == currentBestLocation.provider
+
+        // Determine location quality using a combination of timeliness and accuracy
+        if (isMoreAccurate) {
+            return true
+        } else if (isNewer && !isLessAccurate) {
+            return true
+        } else if (isNewer && !isSignificantlyLessAccurate && isFromSameProvider) {
+            return true
+        }
+        return false
+    }
+
+    // Updated getCurrentLocationString to check the location toggle
     fun getCurrentLocationString(): String {
-        return currentLocation?.let {
-            "%.6f,%.6f".format(it.latitude, it.longitude)
-        } ?: "N/A"
+        return if (isLocationEnabled) {
+            currentLocation?.let {
+                "%.6f,%.6f".format(it.latitude, it.longitude)
+            } ?: "N/A"
+        } else {
+            "N/A"
+        }
     }
 
     private fun connectToServerAndStartHeartbeat() {
@@ -265,31 +412,31 @@ class MainActivity : AppCompatActivity(), LocationListener {
 //
 //                when (pingResult) {
 //                    is ApiResponse.Success -> {
-                        // Server is reachable, now connect with device info
-                        val location = getCurrentLocationString()
-                        val connectResult = apiService?.connectToServer(location)
+                // Server is reachable, now connect with device info
+                val location = getCurrentLocationString()
+                val connectResult = apiService?.connectToServer(location)
 
-                        when (connectResult) {
-                            is ApiResponse.Success -> {
-                                Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
+                when (connectResult) {
+                    is ApiResponse.Success -> {
+                        Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
-                                // Clear log and show connection info
-                                tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
+                        // Clear log and show connection info
+                        tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
 
-                                // Start service for server-controlled operations
-                                pingService?.startServerControlledMode()
+                        // Start service for server-controlled operations
+                        pingService?.startServerControlledMode()
 
-                                // Start 5-minute heartbeat
-                                apiService?.startHeartbeat(location)
-                                updateUI()
-                            }
-                            is ApiResponse.Error -> {
-                                Toast.makeText(this@MainActivity, "Server connection failed: ${connectResult.message}", Toast.LENGTH_LONG).show()
-                            }
-                            null -> {
-                                Toast.makeText(this@MainActivity, "API service not available", Toast.LENGTH_LONG).show()
-                            }
-                        }
+                        // Start 5-minute heartbeat
+                        apiService?.startHeartbeat(location)
+                        updateUI()
+                    }
+                    is ApiResponse.Error -> {
+                        Toast.makeText(this@MainActivity, "Server connection failed: ${connectResult.message}", Toast.LENGTH_LONG).show()
+                    }
+                    null -> {
+                        Toast.makeText(this@MainActivity, "API service not available", Toast.LENGTH_LONG).show()
+                    }
+                }
 //                    }
 //                    is ApiResponse.Error -> {
 //                        Toast.makeText(this@MainActivity, "Server unreachable: ${pingResult.message}", Toast.LENGTH_LONG).show()
@@ -387,7 +534,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             )
         } else {
             tvServerInstructions.text = "Server instruction: Wait for further instructions"
-            tvLog.append("💓 Heartbeat sent - waiting for instructions\n")
+            tvLog.append("💡 Heartbeat sent - waiting for instructions\n")
         }
     }
 
@@ -451,11 +598,13 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val etTimeout = dialogView.findViewById<EditText>(R.id.etTimeout)
         val etTcpPort = dialogView.findViewById<EditText>(R.id.etTcpPort)
         val etUdpPort = dialogView.findViewById<EditText>(R.id.etUdpPort)
+        val swLocationEnabled = dialogView.findViewById<SwitchCompat>(R.id.swLocationEnabled)
 
         etPacketSize.setText(packetSize.toString())
         etTimeout.setText(timeout.toString())
         etTcpPort.setText(tcpPort.toString())
         etUdpPort.setText(udpPort.toString())
+        swLocationEnabled.isChecked = isLocationEnabled
 
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.settings_title))
@@ -465,6 +614,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 timeout = etTimeout.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: timeout
                 tcpPort = etTcpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: tcpPort
                 udpPort = etUdpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: udpPort
+                isLocationEnabled = swLocationEnabled.isChecked
+
+                // Save to SharedPreferences using the KTX extension
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+                    putBoolean(PREF_LOCATION_ENABLED, isLocationEnabled)
+                }
 
                 // Update service settings
                 pingService?.updateSettings(packetSize, timeout, tcpPort, udpPort)
@@ -491,7 +646,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         tvStatus.text = "Connected - Executing ping instruction"
                     }
                     isConnected && isHeartbeatRunning -> {
-                        tvStatus.text = "Connected - 5min heartbeat active - Awaiting server instructions"
+                        tvStatus.text = "Connected - Heartbeat active - Awaiting server instructions"
                     }
                     isConnected -> {
                         tvStatus.text = "Connected - Heartbeat stopped"
