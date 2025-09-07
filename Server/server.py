@@ -13,6 +13,7 @@ import urllib.parse
 import os
 import threading
 import random
+import ssl
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -602,6 +603,20 @@ def run_server(port=8080):
     """Start the simplified REST API server"""
     server_address = ('', port)
     httpd = HTTPServer(server_address, PingRestApiHandler)
+
+    # --- ADD THIS SECTION TO ENABLE SSL/TLS (HTTPS) ---
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    try:
+        # Assumes 'cert.pem' and 'key.pem' are in the same directory
+        ssl_context.load_cert_chain(keyfile='key.pem', certfile='cert.pem')
+        httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
+        logger.info("Server configured with SSL/TLS (HTTPS)")
+    except FileNotFoundError:
+        logger.error("SSL certificate (cert.pem) or key (key.pem) not found.")
+        logger.error("Please generate them using openssl and place them in the same directory.")
+        logger.error("Example: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes")
+        return
+    # --- END OF ADDED SECTION ---
 
     logger.info(f"Starting Simple Ping REST API Server on port {port}")
     logger.info("Available REST endpoints:")

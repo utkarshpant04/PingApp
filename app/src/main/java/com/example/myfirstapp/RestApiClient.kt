@@ -28,7 +28,7 @@ class ApiService : Service() {
 
     companion object {
         private const val TAG = "ApiService"
-        private const val SERVER_BASE_URL = "http://dragon.wag.org.in:12345/api" // Change for physical device
+        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12345/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
@@ -138,7 +138,7 @@ class ApiService : Service() {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 NOTIFICATION_CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_MIN // 👈 changed from LOW
             ).apply {
                 description = "Notifications for API service status and ping operations"
                 setShowBadge(false)
@@ -182,6 +182,7 @@ class ApiService : Service() {
             .setOngoing(true)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
 
@@ -204,7 +205,7 @@ class ApiService : Service() {
             .setContentIntent(pendingIntent)
             .setAutoCancel(autoCancel)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
 
         if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
@@ -243,7 +244,7 @@ class ApiService : Service() {
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
 
         if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
@@ -612,6 +613,11 @@ class ApiService : Service() {
                             }
                         }
                     }
+                } catch (e: CancellationException) {
+                    // This is a normal cancellation, not an error.
+                    Log.i(TAG, "Heartbeat coroutine was cancelled as expected.")
+                    throw e // Re-throw the exception to ensure the coroutine is properly cancelled.
+
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in heartbeat/reconnect loop", e)
                     statusCallback?.invoke("system_error", "System error: ${e.message}")

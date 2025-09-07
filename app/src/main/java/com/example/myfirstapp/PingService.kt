@@ -23,7 +23,7 @@ class PingService : Service() {
     }
 
     private val CHANNEL_ID = "PingServiceChannel"
-    private val NOTIFICATION_ID = 1
+    private val NOTIFICATION_ID = 2
 
     private val binder = PingBinder()
     private var pingJob: Job? = null
@@ -116,12 +116,18 @@ class PingService : Service() {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.ping_service_channel),
-                NotificationManager.IMPORTANCE_LOW
-            )
+                NotificationManager.IMPORTANCE_MIN // 👈 changed from IMPORTANCE_LOW
+            ).apply {
+                setShowBadge(false)
+                enableLights(false)
+                enableVibration(false)
+                setSound(null, null)
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(serviceChannel)
         }
     }
+
 
     private fun createNotification(title: String, content: String): Notification {
         val notificationIntent = Intent(this, MainActivity::class.java)
@@ -138,6 +144,7 @@ class PingService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
 
