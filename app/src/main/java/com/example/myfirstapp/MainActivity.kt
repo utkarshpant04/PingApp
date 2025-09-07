@@ -588,6 +588,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 showSettingsDialog()
                 true
             }
+            R.id.action_clear_logs -> {
+                clearLogs()
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -658,5 +662,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
             }
         }
+    }
+
+    private fun clearLogs() {
+        tvLog.text = ""
+        tvLog.append("Log cleared.\n")
     }
 }

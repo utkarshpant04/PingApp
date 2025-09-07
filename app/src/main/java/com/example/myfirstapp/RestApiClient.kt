@@ -28,7 +28,7 @@ class ApiService : Service() {
 
     companion object {
         private const val TAG = "ApiService"
-        private const val SERVER_BASE_URL = "http://10.0.2.2:8080/api" // Change for physical device
+        private const val SERVER_BASE_URL = "http://dragon.wag.org.in:12345/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
