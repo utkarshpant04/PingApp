@@ -33,7 +33,7 @@ class ApiService : Service() {
         private const val READ_TIMEOUT = 30000
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
         private const val RECONNECT_INTERVAL_MS = 2 * 60 * 1000L // 2 minutes
-        private const val MAX_FAILED_UPLOADS = 50 // Maximum number of failed uploads to store
+        private const val MAX_FAILED_UPLOADS = 5000 // Maximum number of failed uploads to store
 
         // Notification constants
         private const val NOTIFICATION_CHANNEL_ID = "api_service_channel"
@@ -469,7 +469,7 @@ class ApiService : Service() {
         )
 
         failedUploadQueue.offer(failedItem)
-        Log.i(TAG, "📥 Added failed upload to queue: ${sessionData.sessionId} (Queue size: ${failedUploadQueue.size})")
+        Log.i(TAG, "Added failed upload to queue: ${sessionData.sessionId} (Queue size: ${failedUploadQueue.size})")
         updateOngoingNotification()
     }
 
@@ -480,7 +480,7 @@ class ApiService : Service() {
         if (failedUploadQueue.isEmpty()) return
 
         val startSize = failedUploadQueue.size
-        Log.i(TAG, "🔄 Starting failed upload retry process. Queue size: $startSize")
+        Log.i(TAG, "Starting failed upload retry process. Queue size: $startSize")
 
         val successfulUploads = mutableListOf<FailedUploadItem>()
         val failedRetries = mutableListOf<FailedUploadItem>()
@@ -489,7 +489,7 @@ class ApiService : Service() {
         while (failedUploadQueue.isNotEmpty()) {
             val failedItem = failedUploadQueue.poll() ?: break
 
-            Log.d(TAG, "📤 Retrying upload for session: ${failedItem.sessionData.sessionId} (Attempt ${failedItem.failedAttempts + 1})")
+            Log.d(TAG, "Retrying upload for session: ${failedItem.sessionData.sessionId} (Attempt ${failedItem.failedAttempts + 1})")
 
             try {
                 val result = uploadPingSessionInternal(failedItem.sessionData)
@@ -497,7 +497,7 @@ class ApiService : Service() {
                 when (result) {
                     is ApiResponse.Success -> {
                         successfulUploads.add(failedItem)
-                        Log.i(TAG, "✅ Successfully reuploaded session: ${failedItem.sessionData.sessionId}")
+                        Log.i(TAG, "Successfully reuploaded session: ${failedItem.sessionData.sessionId}")
                     }
                     is ApiResponse.Error -> {
                         // Update failure info and add back to retry list if not too many attempts
@@ -508,9 +508,9 @@ class ApiService : Service() {
 
                         if (updatedItem.failedAttempts < 5) { // Max 5 attempts
                             failedRetries.add(updatedItem)
-                            Log.w(TAG, "❌ Reupload failed for session: ${failedItem.sessionData.sessionId} (Attempt ${updatedItem.failedAttempts}/5) - Error: ${result.message}")
+                            Log.w(TAG, "Reupload failed for session: ${failedItem.sessionData.sessionId} (Attempt ${updatedItem.failedAttempts}/5) - Error: ${result.message}")
                         } else {
-                            Log.e(TAG, "🗑️ Dropping session after 5 failed attempts: ${failedItem.sessionData.sessionId}")
+                            Log.e(TAG, "Dropping session after 5 failed attempts: ${failedItem.sessionData.sessionId}")
                         }
                     }
                 }
@@ -522,9 +522,9 @@ class ApiService : Service() {
 
                 if (updatedItem.failedAttempts < 5) {
                     failedRetries.add(updatedItem)
-                    Log.w(TAG, "❌ Exception during reupload for session: ${failedItem.sessionData.sessionId} - ${e.message}")
+                    Log.w(TAG, "Exception during reupload for session: ${failedItem.sessionData.sessionId} - ${e.message}")
                 } else {
-                    Log.e(TAG, "🗑️ Dropping session after 5 failed attempts due to exceptions: ${failedItem.sessionData.sessionId}")
+                    Log.e(TAG, "Dropping session after 5 failed attempts due to exceptions: ${failedItem.sessionData.sessionId}")
                 }
             }
         }
@@ -535,7 +535,7 @@ class ApiService : Service() {
         val endSize = failedUploadQueue.size
         val processedCount = startSize - endSize + successfulUploads.size
 
-        Log.i(TAG, "🔄 Failed upload retry completed:")
+        Log.i(TAG, "Failed upload retry completed:")
         Log.i(TAG, "  • Processed: $processedCount items")
         Log.i(TAG, "  • Successful: ${successfulUploads.size}")
         Log.i(TAG, "  • Still pending: $endSize")
@@ -596,14 +596,14 @@ class ApiService : Service() {
                         val connectResult = connectToServer(lastLocation)
                         when (connectResult) {
                             is ApiResponse.Success -> {
-                                Log.i(TAG, "🔄 Reconnection successful! Resuming normal heartbeat mode")
+                                Log.i(TAG, "Reconnection successful! Resuming normal heartbeat mode")
                                 statusCallback?.invoke("reconnected", "Successfully reconnected to server")
                                 showServiceNotification("Reconnected", "Successfully reconnected to server")
                                 updateOngoingNotification()
                                 delayUsed = 0L // Reset delay for next heartbeat cycle
                             }
                             is ApiResponse.Error -> {
-                                Log.w(TAG, "🔄 Reconnection failed: ${connectResult.message}")
+                                Log.w(TAG, "Reconnection failed: ${connectResult.message}")
                                 statusCallback?.invoke("reconnect_failed", "Reconnection failed: ${connectResult.message}")
 
                                 // Wait for reconnection interval before trying again
@@ -665,7 +665,7 @@ class ApiService : Service() {
             when (response) {
                 is ApiResponse.Success -> {
                     val data = response.data
-                    Log.i(TAG, "💓 Heartbeat #$count successful at $currentTime")
+                    Log.i(TAG, "Heartbeat #$count successful at $currentTime")
 
                     // Check for server instructions
                     if (data.optBoolean("send_ping", false)) {
@@ -680,21 +680,21 @@ class ApiService : Service() {
                             delay = delayMs
                         )
 
-                        Log.i(TAG, "📋 Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s with ${delayMs}ms delay")
+                        Log.i(TAG, "Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s with ${delayMs}ms delay")
 
                         // Apply delay before executing instruction
                         if (delayMs > 0) {
-                            Log.i(TAG, "⏰ Waiting ${delayMs}ms before executing instruction...")
+                            Log.i(TAG, "Waiting ${delayMs}ms before executing instruction...")
                             delay(delayMs)
                             delayUsed = delayMs
-                            Log.i(TAG, "✅ Delay completed, executing instruction now")
+                            Log.i(TAG, "Delay completed, executing instruction now")
                         }
 
                         // Show notification for server instruction
                         showInstructionNotification(instruction)
                         onInstructionReceived?.invoke(instruction)
                     } else {
-                        Log.d(TAG, "💓 Heartbeat #$count: No server instruction - standing by")
+                        Log.d(TAG, "Heartbeat #$count: No server instruction - standing by")
                         // Still notify that heartbeat was received but no instruction
                         val instruction = ServerInstruction(sendPing = false)
                         showInstructionNotification(instruction)
@@ -702,7 +702,7 @@ class ApiService : Service() {
                     }
                 }
                 is ApiResponse.Error -> {
-                    Log.e(TAG, "❌ Heartbeat #$count failed at $currentTime: ${response.code} - ${response.message}")
+                    Log.e(TAG, "Heartbeat #$count failed at $currentTime: ${response.code} - ${response.message}")
                     statusCallback?.invoke("heartbeat_error", "Heartbeat failed: ${response.message}")
                     showServiceNotification("Heartbeat Error", "Failed: ${response.message}")
 
@@ -712,7 +712,7 @@ class ApiService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Error during heartbeat #$count at $currentTime", e)
+            Log.e(TAG, "Error during heartbeat #$count at $currentTime", e)
             statusCallback?.invoke("heartbeat_error", "Heartbeat error: ${e.message}")
             showServiceNotification("Heartbeat Error", "Error: ${e.message}")
 
@@ -764,9 +764,9 @@ class ApiService : Service() {
                     val responseJson = JSONObject(response)
                     if (responseJson.optBoolean("send_ping", false)) {
                         val delayMs = responseJson.optLong("delay_ms", 0)
-                        Log.i(TAG, "📋 Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")}) with ${delayMs}ms delay")
+                        Log.i(TAG, "Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")}) with ${delayMs}ms delay")
                     } else {
-                        Log.d(TAG, "💓 Heartbeat response: No server instructions")
+                        Log.d(TAG, "Heartbeat response: No server instructions")
                     }
                     return@withContext ApiResponse.Success(JSONObject(response))
                 } else {
@@ -788,11 +788,11 @@ class ApiService : Service() {
 
         when (result) {
             is ApiResponse.Success -> {
-                Log.i(TAG, "✅ Session uploaded successfully: ${sessionData.sessionId}")
+                Log.i(TAG, "Session uploaded successfully: ${sessionData.sessionId}")
                 return result
             }
             is ApiResponse.Error -> {
-                Log.w(TAG, "❌ Session upload failed: ${sessionData.sessionId} - ${result.message}")
+                Log.w(TAG, "Session upload failed: ${sessionData.sessionId} - ${result.message}")
                 addToFailedUploadQueue(sessionData)
                 statusCallback?.invoke("upload_queued", "Upload failed, added to retry queue")
                 return result

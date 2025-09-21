@@ -71,7 +71,9 @@
         android:background="@android:color/holo_blue_light"
         android:textColor="@android:color/white"
         android:layout_marginBottom="16dp"
-        android:gravity="center" />
+        android:gravity="center"
+        android:visibility="gone" />
+    >
 
     <TextView
         android:layout_width="match_parent"
@@ -92,10 +94,10 @@
             android:id="@+id/tvLog"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:fontFamily="monospace"
             android:text="Ready to connect to server...\n"
             android:textColor="@android:color/holo_green_light"
-            android:textSize="12sp"
-            android:fontFamily="monospace" />
+            android:textSize="12sp" />
 
     </ScrollView>
 
