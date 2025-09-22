@@ -858,8 +858,27 @@ class ApiService : Service() {
                     }
                 }
 
-                connection.outputStream.use { os: OutputStream ->
-                    os.write(sessionJson.toString().toByteArray())
+                val jsonString = sessionJson.toString()
+                val jsonBytes = jsonString.toByteArray(Charsets.UTF_8)
+                connection.setFixedLengthStreamingMode(jsonBytes.size)
+
+                connection.outputStream.use { os ->
+                    val chunkSize = 8192 // 8KB chunks
+                    var offset = 0
+
+                    while (offset < jsonBytes.size) {
+                        val remainingBytes = jsonBytes.size - offset
+                        val currentChunkSize = minOf(chunkSize, remainingBytes)
+
+                        os.write(jsonBytes, offset, currentChunkSize)
+                        os.flush() // Ensure data is sent
+                        offset += currentChunkSize
+
+                        // Small delay to prevent overwhelming the connection
+                        if (offset < jsonBytes.size) {
+                            delay(1)
+                        }
+                    }
                 }
 
                 val responseCode = connection.responseCode

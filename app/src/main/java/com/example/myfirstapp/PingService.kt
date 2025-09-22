@@ -14,7 +14,14 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.*
+import java.util.UUID
 import kotlin.system.measureTimeMillis
+import kotlin.random.Random
+
+// Method 1: Using UUID (Most Reliable)
+fun generateSessionIdUUID(): String {
+    return "session_${UUID.randomUUID()}"
+}
 
 class PingService : Service() {
 
@@ -52,7 +59,7 @@ class PingService : Service() {
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
-    private var udpPort = 5001
+    private var udpPort = 50001
 
     // Callbacks
     private var logCallback: ((String) -> Unit)? = null
@@ -174,11 +181,9 @@ class PingService : Service() {
         locationCallback = callback
     }
 
-    fun updateSettings(packetSize: Int, timeout: Int, tcpPort: Int, udpPort: Int) {
+    fun updateSettings(packetSize: Int, timeout: Int) {
         this.packetSize = packetSize
         this.timeout = timeout
-        this.tcpPort = tcpPort
-        this.udpPort = udpPort
         log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms, TCP=$tcpPort, UDP=$udpPort")
     }
 
@@ -243,7 +248,7 @@ class PingService : Service() {
         packetsReceived = 0
         totalBytesTransferred = 0L
         startTime = System.currentTimeMillis()
-        sessionId = "server_session_${System.currentTimeMillis()}_${(1000..9999).random()}"
+        sessionId = generateSessionIdUUID()
         pingResults.clear()
         minRtt = Double.MAX_VALUE
         maxRtt = 0.0

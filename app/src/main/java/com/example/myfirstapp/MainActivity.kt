@@ -45,7 +45,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
-    private var udpPort = 5001
+    private var udpPort = 50001
 
     // New location toggle variables and SharedPreferences
     private val PREFS_NAME = "MyPrefs"
@@ -600,14 +600,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val dialogView = layoutInflater.inflate(R.layout.dialog_settings, null)
         val etPacketSize = dialogView.findViewById<EditText>(R.id.etPacketSize)
         val etTimeout = dialogView.findViewById<EditText>(R.id.etTimeout)
-        val etTcpPort = dialogView.findViewById<EditText>(R.id.etTcpPort)
-        val etUdpPort = dialogView.findViewById<EditText>(R.id.etUdpPort)
         val swLocationEnabled = dialogView.findViewById<SwitchCompat>(R.id.swLocationEnabled)
 
         etPacketSize.setText(packetSize.toString())
         etTimeout.setText(timeout.toString())
-        etTcpPort.setText(tcpPort.toString())
-        etUdpPort.setText(udpPort.toString())
         swLocationEnabled.isChecked = isLocationEnabled
 
         AlertDialog.Builder(this)
@@ -616,8 +612,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
             .setPositiveButton(getString(R.string.save)) { _, _ ->
                 packetSize = etPacketSize.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: packetSize
                 timeout = etTimeout.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: timeout
-                tcpPort = etTcpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: tcpPort
-                udpPort = etUdpPort.text.toString().toIntOrNull()?.takeIf { it > 0 } ?: udpPort
                 isLocationEnabled = swLocationEnabled.isChecked
 
                 // Save to SharedPreferences using the KTX extension
@@ -626,7 +620,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
 
                 // Update service settings
-                pingService?.updateSettings(packetSize, timeout, tcpPort, udpPort)
+                pingService?.updateSettings(packetSize, timeout)
             }
             .setNegativeButton(getString(R.string.cancel), null)
             .show()

@@ -3,7 +3,6 @@
 REST API Server for Ping App with Simple Always-Send Instructions
 Sends ping instructions on every heartbeat request
 """
-prob = 0.9
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import logging
@@ -13,7 +12,13 @@ import urllib.parse
 import os
 import threading
 import random
+import numpy as np
 import ssl
+
+def get_instruction_delay(average_seconds=30.0):
+    delay_seconds = np.random.poisson(lam=100)  # Average 30 seconds
+    return delay_seconds*1000  # Convert to milliseconds
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,7 +33,7 @@ class PingDataServer:
 
     def load_default_ping_instructions(self):
         return [
-            {"host": "google.com", "protocol": "TCP", "duration_seconds": 45, "interval_ms": 500},
+            {"host": "170.187.252.25", "protocol": "UDP", "duration_seconds": 15, "interval_ms": 500, "delay_ms": 5000},
         ]
 
     def init_database(self):
@@ -162,9 +167,14 @@ class PingDataServer:
                 return None
 
     def get_ping_instruction(self):
-        """Get a ping instruction - randomly select from available instructions"""
+        """Get a ping instruction - randomly select from available instructions with exponential delay"""
         if self.ping_instructions:
-            return random.choice(self.ping_instructions)
+            instruction = random.choice(self.ping_instructions)
+
+            # Generate delay using separate function
+            instruction['delay_ms'] = get_instruction_delay(average_seconds=30.0)
+
+            return instruction
         return None
 
     def store_heartbeat(self, heartbeat_data):
@@ -221,7 +231,7 @@ class PingDataServer:
 
                 # Insert session data
                 cursor.execute('''
-                    INSERT INTO ping_sessions
+                    INSERT or REPLACE INTO ping_sessions
                     (session_id, client_id, host, protocol, start_time, end_time,
                      duration_seconds, packets_sent, packets_received, packet_loss_percent,
                      avg_rtt_ms, min_rtt_ms, max_rtt_ms, total_bytes, avg_bandwidth_bps,
@@ -237,7 +247,8 @@ class PingDataServer:
                     session_data.get('avg_bandwidth_bps', 0), session_data.get('start_location', 'N/A'),
                     session_data.get('end_location', 'N/A'), json.dumps(session_data.get('settings', {}))
                 ))
-
+                #firewall  based notification
+                # poisson
                 # Update client session count
                 cursor.execute('''
                     UPDATE clients SET
@@ -493,13 +504,15 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             }
 
             # Add ping instruction (always available)
-            if instruction and random.random() < prob:  # 90% chance to send instruction
+            print(random.random())
+            if instruction:  # 90% chance to send instruction
                 response.update({
                     "ping_host": instruction["host"],
                     "ping_protocol": instruction["protocol"],
                     "ping_duration_seconds": instruction["duration_seconds"],
                     "ping_interval_ms": instruction["interval_ms"],
-                    "instruction_id": f"inst_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    "instruction_id": f"inst_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    "delay_ms": instruction["delay_ms"]
                 })
                 logger.info(f"Sent ping instruction to {client_id}: {instruction['host']} ({instruction['protocol']})")
             else:
@@ -616,7 +629,7 @@ def run_server(port=8080):
         logger.error("Please generate them using openssl and place them in the same directory.")
         logger.error("Example: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes")
         return
-    # --- END OF ADDED SECTION ---
+        # --- END OF ADDED SECTION ---
 
     logger.info(f"Starting Simple Ping REST API Server on port {port}")
     logger.info("Available REST endpoints:")
@@ -641,7 +654,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Simple Ping REST API Server')
-    parser.add_argument('--port', type=int, default=8080, help='Server port (default: 8080)')
+    parser.add_argument('--port', type=int, default=12345, help='Server port (default: 8080)')
     parser.add_argument('--db', type=str, default='ping_data.db', help='Database file path')
     args = parser.parse_args()
 
