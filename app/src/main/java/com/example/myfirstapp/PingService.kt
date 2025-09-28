@@ -137,7 +137,9 @@ class PingService : Service() {
 
 
     private fun createNotification(title: String, content: String): Notification {
-        val notificationIntent = Intent(this, MainActivity::class.java)
+        val notificationIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
@@ -146,31 +148,33 @@ class PingService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(content)
+            .setContentTitle("Background Service")
+            .setContentText("Active")
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
     }
 
     private fun updateNotification() {
-        if (!isExecutingPingInstruction) return
-
-        val loss = if (packetsSent > 0) {
-            ((packetsSent - packetsReceived) * 100) / packetsSent
-        } else 0
-
-        val bandwidth = calculateBandwidth()
-
-        val notification = createNotification(
-            getString(R.string.executing_server_instruction, currentHost, currentProtocol),
-            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
-        )
-
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, notification)
+//        if (!isExecutingPingInstruction) return
+//
+//        val loss = if (packetsSent > 0) {
+//            ((packetsSent - packetsReceived) * 100) / packetsSent
+//        } else 0
+//
+//        val bandwidth = calculateBandwidth()
+//
+//        val notification = createNotification(
+//            getString(R.string.executing_server_instruction, currentHost, currentProtocol),
+//            "Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)}"
+//        )
+//
+//        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+//        notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     fun setLogCallback(callback: (String) -> Unit) {

@@ -156,9 +156,10 @@ class ApiService : Service() {
      * Create ongoing notification for foreground service
      */
     private fun createOngoingNotification(statusOverride: String? = null): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        val intent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
@@ -175,8 +176,8 @@ class ApiService : Service() {
         }
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("Ping App - API Service")
-            .setContentText(status)
+            .setContentTitle("API Service")
+            .setContentText("Active")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -186,70 +187,71 @@ class ApiService : Service() {
             .build()
     }
 
+
     /**
      * Show general service notification
      */
     private fun showServiceNotification(title: String, message: String, autoCancel: Boolean = true) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        )
-
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(autoCancel)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .build()
-
-        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
-        }
+//        val intent = Intent(this, MainActivity::class.java).apply {
+//            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+//        }
+//        val pendingIntent = PendingIntent.getActivity(
+//            this, 0, intent,
+//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+//        )
+//
+//        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+//            .setContentTitle(title)
+//            .setContentText(message)
+//            .setSmallIcon(android.R.drawable.ic_dialog_info)
+//            .setContentIntent(pendingIntent)
+//            .setAutoCancel(autoCancel)
+//            .setSilent(true)
+//            .setPriority(NotificationCompat.PRIORITY_MIN)
+//            .build()
+//
+//        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+//            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
+//        }
     }
 
     /**
      * Show server instruction notification
      */
     private fun showInstructionNotification(instruction: ServerInstruction) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        )
-
-        val title = if (instruction.sendPing) {
-            "Server Instruction Received"
-        } else {
-            "Heartbeat Sent"
-        }
-
-        val message = if (instruction.sendPing) {
-            "Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-        } else {
-            "Waiting for server instructions..."
-        }
-
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(true)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .build()
-
-        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
-        }
+//        val intent = Intent(this, MainActivity::class.java).apply {
+//            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+//        }
+//        val pendingIntent = PendingIntent.getActivity(
+//            this, 0, intent,
+//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+//        )
+//
+//        val title = if (instruction.sendPing) {
+//            "Server Instruction Received"
+//        } else {
+//            "Heartbeat Sent"
+//        }
+//
+//        val message = if (instruction.sendPing) {
+//            "Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
+//        } else {
+//            "Waiting for server instructions..."
+//        }
+//
+//        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+//            .setContentTitle(title)
+//            .setContentText(message)
+//            .setSmallIcon(android.R.drawable.ic_dialog_info)
+//            .setContentIntent(pendingIntent)
+//            .setAutoCancel(true)
+//            .setSilent(true)
+//            .setPriority(NotificationCompat.PRIORITY_MIN)
+//            .build()
+//
+//        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+//            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
+//        }
     }
 
     private fun updateOngoingNotification() {
