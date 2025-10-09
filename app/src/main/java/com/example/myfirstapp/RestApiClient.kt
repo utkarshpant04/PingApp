@@ -852,6 +852,7 @@ class ApiService : Service() {
                                 put("success", result.success)
                                 put("rtt_ms", result.rttMs)
                                 put("location", result.location)
+                                put("network_type", result.networkType)
                                 put("error_message", result.errorMessage)
                             }
                             resultsArray.put(resultJson)
@@ -1034,6 +1035,7 @@ data class PingResult(
     val success: Boolean,
     val rttMs: Double,
     val location: String = "N/A",
+    val networkType: String = "Unknown",  // NEW FIELD
     val errorMessage: String = ""
 )
 

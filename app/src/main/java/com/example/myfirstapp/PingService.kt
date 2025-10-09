@@ -188,7 +188,7 @@ class PingService : Service() {
     fun updateSettings(packetSize: Int, timeout: Int) {
         this.packetSize = packetSize
         this.timeout = timeout
-        log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms, TCP=$tcpPort, UDP=$udpPort")
+        log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms")
     }
 
     fun startServerControlledMode() {
@@ -288,6 +288,8 @@ class PingService : Service() {
                 val currentLoc = locationCallback?.invoke() ?: location
                 currentLocation = currentLoc
 
+                val networkType = NetworkUtils.getNetworkType(applicationContext)
+
                 val success: Boolean
                 val rtt = measureTimeMillis {
                     success = when (protocol.uppercase()) {
@@ -308,6 +310,7 @@ class PingService : Service() {
                     success = success,
                     rttMs = rtt.toDouble(),
                     location = currentLoc,
+                    networkType = networkType,  // NEW FIELD
                     errorMessage = if (!success) "Request timed out" else ""
                 )
                 pingResults.add(pingResult)
@@ -336,7 +339,7 @@ class PingService : Service() {
                 val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
 
                 if (success) {
-                    log("Reply from $host: time=${rtt}ms | Loc: $currentLoc | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
+                    log("Reply from $host: time=${rtt}ms | Net: $networkType | Loc: $currentLoc | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 } else {
                     log("Request timed out | Loc: $currentLoc | Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
                 }

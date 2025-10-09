@@ -92,6 +92,7 @@ class PingDataServer:
                     success BOOLEAN,
                     rtt_ms REAL,
                     location TEXT,
+                    network_type TEXT,
                     error_message TEXT,
                     FOREIGN KEY (session_id) REFERENCES ping_sessions (session_id)
                 )
@@ -262,12 +263,13 @@ class PingDataServer:
                     for result in session_data['ping_results']:
                         cursor.execute('''
                             INSERT INTO ping_results
-                            (session_id, timestamp, sequence_number, success, rtt_ms, location, error_message)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            (session_id, timestamp, sequence_number, success, rtt_ms, location, network_type, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             session_data['session_id'], result.get('timestamp', ''),
                             result.get('sequence', 0), result.get('success', False),
                             result.get('rtt_ms', 0), result.get('location', 'N/A'),
+                            result.get('network_type', 'Unknown'),
                             result.get('error_message', '')
                         ))
 
