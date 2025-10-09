@@ -15,8 +15,8 @@ import random
 import numpy as np
 import ssl
 
-def get_instruction_delay(average_seconds=30.0):
-    delay_seconds = np.random.poisson(lam=100)  # Average 30 seconds
+def get_instruction_delay(average_seconds=30.0*60):
+    delay_seconds = np.random.exponential(scale=average_seconds)  # Average 30 minutes
     return delay_seconds*1000  # Convert to milliseconds
 
 
@@ -173,7 +173,7 @@ class PingDataServer:
             instruction = random.choice(self.ping_instructions)
 
             # Generate delay using separate function
-            instruction['delay_ms'] = get_instruction_delay(average_seconds=30.0)
+            instruction['delay_ms'] = get_instruction_delay(average_seconds=30.0*60)
 
             return instruction
         return None
@@ -506,7 +506,6 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             }
 
             # Add ping instruction (always available)
-            print(random.random())
             if instruction:  # 90% chance to send instruction
                 response.update({
                     "ping_host": instruction["host"],
