@@ -23,6 +23,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.edit
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : AppCompatActivity(), LocationListener {
 
@@ -52,6 +54,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private val PREF_LOCATION_ENABLED = "location_enabled"
     private var isLocationEnabled = true
 
+    // Date formatter for timestamps
+    private val dateFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+
     // Services
     private var pingService: PingService? = null
     private var apiService: ApiService? = null
@@ -67,13 +72,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             // Set up log observer
             pingService?.setLogCallback { message ->
                 runOnUiThread {
-                    tvLog.append("$message\n")
-                    tvLog.layout?.let { layout ->
-                        val scrollAmount = layout.getLineTop(tvLog.lineCount)
-                        if (scrollAmount > tvLog.height) {
-                            tvLog.scrollTo(0, scrollAmount - tvLog.height)
-                        }
-                    }
+                    appendLog(message)
                 }
             }
 
@@ -155,6 +154,18 @@ class MainActivity : AppCompatActivity(), LocationListener {
         bindService(apiServiceIntent, apiServiceConnection, Context.BIND_AUTO_CREATE)
 
         updateUI()
+    }
+
+    // Helper function to append log with timestamp and auto-scroll
+    private fun appendLog(message: String) {
+        val timestamp = dateFormatter.format(Date())
+        tvLog.append("[$timestamp] $message\n")
+        tvLog.layout?.let { layout ->
+            val scrollAmount = layout.getLineTop(tvLog.lineCount)
+            if (scrollAmount > tvLog.height) {
+                tvLog.scrollTo(0, scrollAmount - tvLog.height)
+            }
+        }
     }
 
     private fun requestAllPermissions() {
@@ -309,7 +320,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
 
                 if (currentLocation != null) {
-                    tvLog.append("Initial location: ${getCurrentLocationString()}\n")
+                    appendLog("Initial location: ${getCurrentLocationString()}")
                 }
 
             } catch (e: SecurityException) {
@@ -327,24 +338,16 @@ class MainActivity : AppCompatActivity(), LocationListener {
             val newLocationString = getCurrentLocationString()
 
             // Log location change
-//            tvLog.append("Location updated: $newLocationString (was: $previousLocation)\n")
-
-            // Scroll to bottom
-            tvLog.layout?.let { layout ->
-                val scrollAmount = layout.getLineTop(tvLog.lineCount)
-                if (scrollAmount > tvLog.height) {
-                    tvLog.scrollTo(0, scrollAmount - tvLog.height)
-                }
-            }
+//            appendLog("Location updated: $newLocationString (was: $previousLocation)")
         }
     }
 
     override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     override fun onProviderEnabled(provider: String) {
-        tvLog.append("Location provider enabled: $provider\n")
+        appendLog("Location provider enabled: $provider")
     }
     override fun onProviderDisabled(provider: String) {
-        tvLog.append("Location provider disabled: $provider\n")
+        appendLog("Location provider disabled: $provider")
     }
 
     /**
@@ -407,11 +410,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
         lifecycleScope.launch {
             try {
-                // First test server connectivity
-//                val pingResult = apiService?.pingServer()
-//
-//                when (pingResult) {
-//                    is ApiResponse.Success -> {
                 // Server is reachable, now connect with device info
                 val location = getCurrentLocationString()
                 val connectResult = apiService?.connectToServer(location)
@@ -420,8 +418,13 @@ class MainActivity : AppCompatActivity(), LocationListener {
                     is ApiResponse.Success -> {
                         Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
-                        // Clear log and show connection info
-                        tvLog.text = "Connected to server successfully\nLocation: $location\nHeartbeat: Every 5 minutes\nWaiting for server instructions...\n"
+                        // Add connection info to existing logs (don't clear)
+                        appendLog("═══════════════════════════════════════")
+                        appendLog("✓ Connected to server successfully")
+                        appendLog("📍 Location: $location")
+                        appendLog("💓 Heartbeat: Every 5 minutes")
+                        appendLog("⏳ Waiting for server instructions...")
+                        appendLog("═══════════════════════════════════════")
 
                         // Start service for server-controlled operations
                         pingService?.startServerControlledMode()
@@ -437,14 +440,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         Toast.makeText(this@MainActivity, "API service not available", Toast.LENGTH_LONG).show()
                     }
                 }
-//                    }
-//                    is ApiResponse.Error -> {
-//                        Toast.makeText(this@MainActivity, "Server unreachable: ${pingResult.message}", Toast.LENGTH_LONG).show()
-//                    }
-//                    null -> {
-//                        Toast.makeText(this@MainActivity, "API service not available", Toast.LENGTH_LONG).show()
-//                    }
-//                }
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, "Connection error: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -459,7 +454,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
             // Stop service operations
             pingService?.stopServerControlledMode()
 
-            tvLog.append("Disconnected from server - heartbeat stopped\n")
+            appendLog("═══════════════════════════════════════")
+            appendLog("✗ Disconnected from server")
+            appendLog("💔 Heartbeat stopped")
+            appendLog("═══════════════════════════════════════")
             Toast.makeText(this@MainActivity, "Disconnected from server", Toast.LENGTH_SHORT).show()
             updateUI()
         }
@@ -505,20 +503,20 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 // Update status will be handled in updateUI()
             }
             "heartbeat_error" -> {
-                tvLog.append("⚠️ $message\n")
+                appendLog("⚠️ $message")
             }
         }
 
         // Log the message if it's informative
         if (message.isNotEmpty() && status != "heartbeat_error") {
-            tvLog.append("ℹ️ $message\n")
+            appendLog("ℹ️ $message")
         }
     }
 
     private fun handleServerInstruction(instruction: ServerInstruction) {
         if (instruction.sendPing) {
             tvServerInstructions.text = "Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-            tvLog.append("📋 Heartbeat received server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s\n")
+            appendLog("📋 Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
 
             // Execute ping as instructed by server
             pingService?.executePingInstruction(
@@ -534,7 +532,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             )
         } else {
             tvServerInstructions.text = "Server instruction: Wait for further instructions"
-            tvLog.append("💡 Heartbeat sent - waiting for instructions\n")
+            appendLog("💡 Heartbeat sent - waiting for instructions")
         }
     }
 
@@ -660,6 +658,6 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     private fun clearLogs() {
         tvLog.text = ""
-        tvLog.append("Log cleared.\n")
+        appendLog("Log cleared")
     }
 }
