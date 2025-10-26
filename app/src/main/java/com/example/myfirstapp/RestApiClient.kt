@@ -28,11 +28,11 @@ class ApiService : Service() {
 
     companion object {
         private const val TAG = "ApiService"
-        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12345/api" // Change for physical device
+        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12346/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
-        private const val HEARTBEAT_INTERVAL_MS = 3 * 60 * 1000L // 1 hr
-        private const val RECONNECT_INTERVAL_MS = 1*60 * 1000L // 1 min
+        private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 1 hr
+        private const val RECONNECT_INTERVAL_MS = 1 * 60 * 1000L // 1 min
         private const val MAX_FAILED_UPLOADS = 5000 // Maximum number of failed uploads to store
         // Notification constants
         private const val NOTIFICATION_CHANNEL_ID = "api_service_channel"

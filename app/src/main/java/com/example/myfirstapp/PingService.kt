@@ -31,10 +31,15 @@ data class PendingPing(
     val networkType: String
 )
 
+
+// Add these variables to the top of your PingService class
+private var udpListenerJob: Job? = null
+private var udpSocket: DatagramSocket? = null
 class PingService : Service() {
 
     companion object {
         private const val TAG = "PingService"
+        private const val LISTENER_PORT = 50002
     }
 
     private val CHANNEL_ID = "PingServiceChannel"
@@ -71,7 +76,7 @@ class PingService : Service() {
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
-    private var udpPort = 50001
+    private var udpPort = 50002
 
     // Pending pings awaiting ACK (sequence number -> ping data)
     private val pendingPings = ConcurrentHashMap<Int, PendingPing>()
@@ -123,6 +128,7 @@ class PingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAllOperations()
+//        stopUdpListener() // Explicitly stop listener
 
         // Unbind from ApiService
         if (isApiServiceBound) {
@@ -213,12 +219,13 @@ class PingService : Service() {
             getString(R.string.awaiting_server_instructions)
         )
         startForeground(NOTIFICATION_ID, notification)
-
+//        startUdpListener() // Start the new listener
         log("Entered server-controlled mode - awaiting instructions")
     }
 
     fun stopServerControlledMode() {
         isInServerControlledMode = false
+//        stopUdpListener() // Stop the new listener
 
         serviceScope.launch {
             sendPingJob?.cancelAndJoin()
@@ -246,7 +253,7 @@ class PingService : Service() {
             log("Cannot execute ping instruction - already executing another instruction")
             return
         }
-
+        log("check 256: pingservice.kt")
         serviceScope.launch {
             sendPingJob?.cancelAndJoin()
             receiveAckJob?.cancelAndJoin()
@@ -554,6 +561,97 @@ class PingService : Service() {
             false
         } catch (e: IOException) {
             false
+        }
+    }
+
+    // New function to start the listener
+
+    // --- NEW FUNCTIONS TO ADD ---
+
+    // New function to stop the listener
+    private fun stopUdpListener() {
+        serviceScope.launch {
+            udpListenerJob?.cancel() // No need for join, let it finish
+            udpListenerJob = null
+            try {
+                udpSocket?.close() // This will interrupt the blocking .receive()
+            } catch (e: Exception) {
+                // Socket already closed, etc.
+            }
+            udpSocket = null
+            log("UDP Listener stopped")
+        }
+    }
+    private fun startUdpListener() {
+        if (udpListenerJob != null && udpListenerJob!!.isActive) {
+            log("UDP Listener already running")
+            return
+        }
+
+        udpListenerJob = serviceScope.launch(Dispatchers.IO) {
+            try {
+                // Bind to the fixed port
+                udpSocket = DatagramSocket(LISTENER_PORT)
+                log("UDP Listener started on port $LISTENER_PORT")
+
+                // --- NAT Traversal / Keep-Alive ---
+                // This is CRITICAL. You must send an outbound packet to
+                // "punch a hole" in the NAT, otherwise the server's
+                // pings will be blocked by the router.
+                launch {
+                    val serverAddress = InetSocketAddress("170.187.252.25", 50002) // Your server
+                    val keepAliveMsg = "KEEP-ALIVE-FROM-CLIENT".toByteArray()
+                    val keepAlivePacket = DatagramPacket(keepAliveMsg, keepAliveMsg.size, serverAddress)
+
+                    while(isActive) {
+                        try {
+                            udpSocket?.send(keepAlivePacket)
+                            // Don't log this, it's too noisy
+                            // log("Sent NAT keep-alive to $serverAddress")
+                        } catch (e: Exception) {
+                            log("Could not send keep-alive: ${e.message}")
+                        }
+                        delay(30_000) // Send keep-alive every 30 seconds
+                    }
+                }
+                // ------------------------------------
+
+                val buffer = ByteArray(4096)
+                val packet = DatagramPacket(buffer, buffer.size)
+
+                // Main listener loop
+                while (isActive) {
+                    try {
+                        // This blocks until a packet is received
+                        udpSocket?.receive(packet)
+
+                        val receivedMessage = String(packet.data, 0, packet.length)
+                        val sourceAddress = packet.socketAddress // This is the server
+                        log("RECV (SERVER-TO-APP) - From: $sourceAddress - Msg: $receivedMessage")
+
+                        // As requested: Send an ACK back
+                        // This is what your server's `per_ping_worker` is waiting for
+                        val ackMessage = "ACK-FROM-CLIENT ${System.currentTimeMillis()}".toByteArray()
+                        val ackPacket = DatagramPacket(ackMessage, ackMessage.size, sourceAddress)
+                        udpSocket?.send(ackPacket)
+                        log("SENT (APP-TO-SERVER) - ACK to $sourceAddress")
+
+                    } catch (e: SocketException) {
+                        if (isActive) { // Don't log error if we're just stopping
+                            log("UDP Socket error (e.g., closed): ${e.message}")
+                        }
+                    } catch (e: Exception) {
+                        if (isActive) log("Error in UDP listener loop: ${e.message}")
+                    }
+                }
+            } catch (e: BindException) {
+                log("ERROR: Could not bind to port $LISTENER_PORT. Port already in use?")
+            } catch (e: Exception) {
+                log("ERROR: UDP Listener failed to start: ${e.message}")
+            } finally {
+                udpSocket?.close()
+                log("UDP Listener shutting down")
+            }
         }
     }
 }

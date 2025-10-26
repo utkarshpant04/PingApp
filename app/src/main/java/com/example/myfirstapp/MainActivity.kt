@@ -47,7 +47,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private var packetSize = 32
     private var timeout = 1000
     private var tcpPort = 80
-    private var udpPort = 50001
+    private var udpPort = 50002
 
     // New location toggle variables and SharedPreferences
     private val PREFS_NAME = "MyPrefs"
@@ -519,6 +519,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             appendLog("📋 Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
 
             // Execute ping as instructed by server
+            appendLog("Line 522: MainActivity.kt")
             pingService?.executePingInstruction(
                 instruction.host,
                 instruction.protocol,
