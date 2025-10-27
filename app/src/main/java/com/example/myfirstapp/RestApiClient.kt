@@ -23,12 +23,19 @@ import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.net.DatagramSocket
+import java.net.DatagramPacket
+import java.net.InetSocketAddress
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.BindException
+
 
 class ApiService : Service() {
 
     companion object {
         private const val TAG = "ApiService"
-        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12346/api" // Change for physical device
+        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12345/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 1 hr
@@ -48,6 +55,11 @@ class ApiService : Service() {
     }
 
     private val binder = ApiBinder()
+    private var udpListenerJob: Job? = null
+    private var udpListenerSocket: DatagramSocket? = null
+    private var udpListenerPort: Int = 0 // Dynamically assigned port
+    private val SERVER_UDP_PORT = 50003 // Port to which we send ready notification
+    private var listenerTimeoutJob: Job? = null
 
     // Use Default dispatcher for background work (not Main)
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -58,13 +70,13 @@ class ApiService : Service() {
 
     private var clientId: String? = null
     private var heartbeatJob: Job? = null
-    private var isHeartbeatActive = false
     private var onInstructionReceived: ((ServerInstruction) -> Unit)? = null
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     // Connection state
-    private var isConnectedToServer = false
-    private var isInReconnectMode = false
+    @Volatile private var isConnectedToServer = false
+    @Volatile private var isInReconnectMode = false
+    @Volatile private var isHeartbeatActive = false
     private var lastLocation = "N/A"
 
     // Failed upload queue - thread-safe
@@ -124,6 +136,7 @@ class ApiService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "ApiService destroying")
+        stopUdpListener()
         stopHeartbeat()
         serviceScope.cancel()
         notificationManager.cancelAll()
@@ -335,6 +348,147 @@ class ApiService : Service() {
     /**
      * Connect to server with device information
      */
+
+    /**
+     * Start UDP listener to receive server-initiated pings
+     * Starts after [startDelayMs] and runs for [activeDurationMs] duration
+     */
+    private fun startUdpListener(
+        startDelayMs: Long = 0L,
+        activeDurationMs: Long = 60_000L // 1 minute default
+    ) {
+        // Don’t start if already running
+        if (udpListenerJob?.isActive == true) {
+            udpListenerJob?.cancel()  // stop the existing listener
+            udpListenerJob = null
+        }
+
+        udpListenerJob = serviceScope.launch(Dispatchers.IO) {
+            if (startDelayMs > 0) {
+                Log.i(TAG, "Delaying UDP listener start by ${startDelayMs}ms")
+                delay(startDelayMs)
+            }
+
+            try {
+                // Create socket
+                udpListenerSocket = DatagramSocket(0)
+                udpListenerPort = udpListenerSocket?.localPort ?: 0
+                udpListenerSocket?.soTimeout = 0
+
+                Log.i(TAG, "UDP Listener started on port $udpListenerPort (duration = ${activeDurationMs}ms)")
+
+                val serverAddress = InetSocketAddress("170.187.252.25", SERVER_UDP_PORT)
+
+                // Send initial "READY" notification
+                val readyMessage = JSONObject().apply {
+                    put("device_id", deviceId)
+                    put("client_id", clientId ?: "unknown")
+                    put("message", "READY_FOR_PINGS")
+                    put("listener_port", udpListenerPort)
+                    put("timestamp", System.currentTimeMillis())
+                }.toString().toByteArray()
+
+                val readyPacket = DatagramPacket(readyMessage, readyMessage.size, serverAddress)
+                udpListenerSocket?.send(readyPacket)
+                Log.i(TAG, "Sent READY notification to server at $serverAddress")
+
+                // Start NAT keep-alive
+                launch {
+                    while (isActive) {
+                        try {
+                            val keepAliveMsg = JSONObject().apply {
+                                put("device_id", deviceId)
+                                put("client_id", clientId ?: "unknown")
+                                put("message", "KEEP_ALIVE")
+                                put("listener_port", udpListenerPort)
+                                put("timestamp", System.currentTimeMillis())
+                            }.toString().toByteArray()
+
+                            val keepAlivePacket = DatagramPacket(keepAliveMsg, keepAliveMsg.size, serverAddress)
+                            udpListenerSocket?.send(keepAlivePacket)
+                            Log.d(TAG, "Sent NAT keep-alive to server (port $udpListenerPort)")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Keep-alive failed: ${e.message}")
+                        }
+                        delay(10_000)
+                    }
+                }
+
+                // Schedule auto-stop after timeout
+                listenerTimeoutJob = launch {
+                    delay(activeDurationMs)
+                    Log.i(TAG, "UDP Listener timeout reached (${activeDurationMs}ms) — stopping now")
+                    stopUdpListener()
+                }
+
+                // Main receive loop
+                val buffer = ByteArray(4096)
+                val receivePacket = DatagramPacket(buffer, buffer.size)
+
+                while (isActive && isConnectedToServer) {
+                    try {
+                        Log.i(TAG, "In the loop")
+                        udpListenerSocket?.receive(receivePacket)
+                        val data = String(receivePacket.data, 0, receivePacket.length, Charsets.UTF_8)
+                        val senderAddress = receivePacket.socketAddress
+                        val receiveTime = System.currentTimeMillis()
+                        Log.i(TAG, "UDP RECV: From $senderAddress - Data: $data")
+
+                        try {
+                            val pingData = JSONObject(data)
+                            val seq = pingData.optInt("sequence", -1)
+                            val sentTime = pingData.optLong("timestamp", 0)
+                            val rtt = if (sentTime > 0) receiveTime - sentTime else -1
+
+                            val ack = JSONObject().apply {
+                                put("device_id", deviceId)
+                                put("client_id", clientId ?: "unknown")
+                                put("message", "ACK")
+                                put("sequence", seq)
+                                put("rtt_ms", rtt)
+                                put("received_timestamp", receiveTime)
+                            }.toString().toByteArray()
+
+                            val ackPacket = DatagramPacket(ack, ack.size, senderAddress)
+                            udpListenerSocket?.send(ackPacket)
+                            Log.i(TAG, "UDP SENT ACK: Seq=$seq RTT=${rtt}ms")
+                        } catch (e: Exception) {
+                            val simpleAck = "ACK:${System.currentTimeMillis()}".toByteArray()
+                            udpListenerSocket?.send(DatagramPacket(simpleAck, simpleAck.size, senderAddress))
+                        }
+
+                    } catch (e: Exception) {
+                        Log.w(TAG, "UDP listener error: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "UDP Listener failed: ${e.message}", e)
+            } finally {
+                udpListenerSocket?.close()
+                udpListenerSocket = null
+                udpListenerPort = 0
+                Log.i(TAG, "UDP Listener stopped")
+            }
+        }
+    }
+
+
+    private fun stopUdpListener() {
+        serviceScope.launch {
+            udpListenerJob?.cancel()
+            udpListenerJob = null
+
+            try {
+                udpListenerSocket?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing UDP socket: ${e.message}")
+            }
+            udpListenerSocket = null
+            udpListenerPort = 0
+
+            Log.i(TAG, "UDP Listener stopped and socket closed")
+        }
+    }
     suspend fun connectToServer(location: String = "N/A"): ApiResponse {
         return withContext(Dispatchers.IO) {
             if (!isNetworkAvailable()) return@withContext ApiResponse.Error(-2, "No network")
@@ -410,6 +564,7 @@ class ApiService : Service() {
                     statusCallback?.invoke("disconnecting", "Disconnecting from server...")
 
                     // Stop heartbeat first
+                    stopUdpListener()
                     stopHeartbeat()
 
                     // Use location callback if available, otherwise use provided location
@@ -683,6 +838,14 @@ class ApiService : Service() {
 
                         Log.i(TAG, "Heartbeat #$count received server instruction: ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s with ${delayMs}ms delay")
 
+                        if (isConnectedToServer && !isInReconnectMode) {
+                            // Start listener with delay and timeout
+                            startUdpListener(
+                                startDelayMs = delayMs,        // Same delay as the ping instruction
+                                activeDurationMs = 60_000L     // Keep active for 1 minute
+                            )
+                        }
+
                         // Apply delay before executing instruction
                         if (delayMs > 0) {
                             Log.i(TAG, "Waiting ${delayMs}ms before executing instruction...")
@@ -691,12 +854,10 @@ class ApiService : Service() {
                             Log.i(TAG, "Delay completed, executing instruction now")
                         }
 
-                        // Show notification for server instruction
                         showInstructionNotification(instruction)
                         onInstructionReceived?.invoke(instruction)
                     } else {
                         Log.d(TAG, "Heartbeat #$count: No server instruction - standing by")
-                        // Still notify that heartbeat was received but no instruction
                         val instruction = ServerInstruction(sendPing = false)
                         showInstructionNotification(instruction)
                         onInstructionReceived?.invoke(instruction)
@@ -707,7 +868,9 @@ class ApiService : Service() {
                     statusCallback?.invoke("heartbeat_error", "Heartbeat failed: ${response.message}")
                     showServiceNotification("Heartbeat Error", "Failed: ${response.message}")
 
-                    // If heartbeat fails, enter disconnected state
+                    // Stop UDP listener on heartbeat failure
+                    stopUdpListener()
+
                     Log.w(TAG, "Heartbeat failure detected, entering disconnected state")
                     enterDisconnectedState()
                 }
@@ -717,7 +880,9 @@ class ApiService : Service() {
             statusCallback?.invoke("heartbeat_error", "Heartbeat error: ${e.message}")
             showServiceNotification("Heartbeat Error", "Error: ${e.message}")
 
-            // If heartbeat encounters an exception (including timeout), enter disconnected state
+            // Stop UDP listener on exception
+            stopUdpListener()
+
             Log.w(TAG, "Heartbeat exception detected, entering disconnected state")
             enterDisconnectedState()
         }
