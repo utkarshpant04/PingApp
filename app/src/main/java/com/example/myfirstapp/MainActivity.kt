@@ -92,7 +92,13 @@ class MainActivity : AppCompatActivity(), LocationListener {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as ApiService.ApiBinder
             apiService = binder.getService()
-            isApiServiceBound = true
+
+            // Add this block
+            apiService?.setLogCallback { message ->
+                runOnUiThread {
+                    appendLog(message)
+                }
+            }
 
             // Set up status callback
             apiService?.setStatusCallback { status, message ->

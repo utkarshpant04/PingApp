@@ -29,6 +29,7 @@ import java.net.InetSocketAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.BindException
+import java.util.UUID
 
 
 class ApiService : Service() {
@@ -38,7 +39,7 @@ class ApiService : Service() {
         private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12345/api" // Change for physical device
         private const val CONNECT_TIMEOUT = 30000
         private const val READ_TIMEOUT = 30000
-        private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000L // 1 hr
+        private const val HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000L // 1 hr
         private const val RECONNECT_INTERVAL_MS = 1 * 60 * 1000L // 1 min
         private const val MAX_FAILED_UPLOADS = 5000 // Maximum number of failed uploads to store
         // Notification constants
@@ -60,6 +61,9 @@ class ApiService : Service() {
     private var udpListenerPort: Int = 0 // Dynamically assigned port
     private val SERVER_UDP_PORT = 50003 // Port to which we send ready notification
     private var listenerTimeoutJob: Job? = null
+
+    private var logCallback: ((String) -> Unit)? = null
+
 
     // Use Default dispatcher for background work (not Main)
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -94,6 +98,16 @@ class ApiService : Service() {
     }
 
     override fun onBind(intent: Intent): IBinder = binder
+
+    fun setLogCallback(callback: (String) -> Unit) {
+        logCallback = callback
+    }
+
+    private fun log(message: String) {
+        Log.i(TAG, message)
+        logCallback?.invoke("$message")
+    }
+
 
     override fun onCreate() {
         super.onCreate()
@@ -375,22 +389,33 @@ class ApiService : Service() {
                 udpListenerPort = udpListenerSocket?.localPort ?: 0
                 udpListenerSocket?.soTimeout = 0
 
-                Log.i(TAG, "UDP Listener started on port $udpListenerPort (duration = ${activeDurationMs}ms)")
+                log("UDP Listener started")// on port $udpListenerPort (duration = ${activeDurationMs}ms)")
 
                 val serverAddress = InetSocketAddress("170.187.252.25", SERVER_UDP_PORT)
 
-                // Send initial "READY" notification
+                // 1. Generate a unique session ID for this listener instance
+                val sessionId = UUID.randomUUID().toString()
+                // 2. Create the "READY" notification message with the session_id
                 val readyMessage = JSONObject().apply {
                     put("device_id", deviceId)
                     put("client_id", clientId ?: "unknown")
                     put("message", "READY_FOR_PINGS")
                     put("listener_port", udpListenerPort)
-                    put("timestamp", System.currentTimeMillis())
+                    put("session_id", sessionId) // Add the unique session ID
                 }.toString().toByteArray()
-
                 val readyPacket = DatagramPacket(readyMessage, readyMessage.size, serverAddress)
-                udpListenerSocket?.send(readyPacket)
-                Log.i(TAG, "Sent READY notification to server at $serverAddress")
+                // 3. Send the "READY" notification 5 times
+                log("Sending READY notifications")// (Session: $sessionId) to server at $serverAddress")
+                repeat(5) { i ->
+                    try {
+                        udpListenerSocket?.send(readyPacket)
+//                        Log.i(TAG, "Sent READY notification (Attempt ${i + 1}/5)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to send READY (Attempt ${i + 1}/5): ${e.message}")
+                        // Optional: Add a small delay before retrying
+                        // delay(100)
+                    }
+                }
 
                 // Start NAT keep-alive
                 launch {
@@ -401,7 +426,6 @@ class ApiService : Service() {
                                 put("client_id", clientId ?: "unknown")
                                 put("message", "KEEP_ALIVE")
                                 put("listener_port", udpListenerPort)
-                                put("timestamp", System.currentTimeMillis())
                             }.toString().toByteArray()
 
                             val keepAlivePacket = DatagramPacket(keepAliveMsg, keepAliveMsg.size, serverAddress)
@@ -417,7 +441,7 @@ class ApiService : Service() {
                 // Schedule auto-stop after timeout
                 listenerTimeoutJob = launch {
                     delay(activeDurationMs)
-                    Log.i(TAG, "UDP Listener timeout reached (${activeDurationMs}ms) — stopping now")
+//                    Log.i(TAG, "UDP Listener timeout reached (${activeDurationMs}ms) — stopping now")
                     stopUdpListener()
                 }
 
@@ -427,7 +451,6 @@ class ApiService : Service() {
 
                 while (isActive && isConnectedToServer) {
                     try {
-                        Log.i(TAG, "In the loop")
                         udpListenerSocket?.receive(receivePacket)
                         val data = String(receivePacket.data, 0, receivePacket.length, Charsets.UTF_8)
                         val senderAddress = receivePacket.socketAddress
@@ -437,21 +460,17 @@ class ApiService : Service() {
                         try {
                             val pingData = JSONObject(data)
                             val seq = pingData.optInt("sequence", -1)
-                            val sentTime = pingData.optLong("timestamp", 0)
-                            val rtt = if (sentTime > 0) receiveTime - sentTime else -1
 
                             val ack = JSONObject().apply {
                                 put("device_id", deviceId)
                                 put("client_id", clientId ?: "unknown")
                                 put("message", "ACK")
                                 put("sequence", seq)
-                                put("rtt_ms", rtt)
-                                put("received_timestamp", receiveTime)
                             }.toString().toByteArray()
 
                             val ackPacket = DatagramPacket(ack, ack.size, senderAddress)
                             udpListenerSocket?.send(ackPacket)
-                            Log.i(TAG, "UDP SENT ACK: Seq=$seq RTT=${rtt}ms")
+                            log("SENT ACK to Server: Seq=$seq")
                         } catch (e: Exception) {
                             val simpleAck = "ACK:${System.currentTimeMillis()}".toByteArray()
                             udpListenerSocket?.send(DatagramPacket(simpleAck, simpleAck.size, senderAddress))

@@ -17,7 +17,7 @@ import ssl
 
 def get_instruction_delay(average_seconds=30.0*60):
     delay_seconds = np.random.exponential(scale=average_seconds)  # Average 30 minutes
-    return delay_seconds*1000  # Convert to milliseconds
+    return max(delay_seconds*1000, 3600*999)  # Convert to milliseconds
 
 
 # Configure logging
