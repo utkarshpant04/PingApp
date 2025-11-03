@@ -68,7 +68,10 @@ class PingService : Service() {
     private var maxRtt = 0.0
     private var totalRtt = 0.0
     private var startLocation = "N/A"
-
+    // ADD THIS
+    private val resultTimestampFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).apply {
+        timeZone = java.util.TimeZone.getTimeZone("UTC")
+    }
     // Ping interval tracking
     private var pingIntervalMs = 100L // Duration between two consecutive pings
 
@@ -321,7 +324,7 @@ class PingService : Service() {
                     networkType = networkType
                 )
 
-                log("SEND PING - Seq: $sequenceNumber ")// | Host: $host | Protocol: $protocol | Location: $currentLoc | Network: $networkType")
+                log("SENT UDP Packet - Seq: $sequenceNumber ")// | Host: $host | Protocol: $protocol | Location: $currentLoc | Network: $networkType")
 
                 // Send ping asynchronously without waiting
                 serviceScope.launch {
@@ -337,6 +340,8 @@ class PingService : Service() {
                     // Check if ping is still pending (hasn't timed out yet)
                     val ping = pendingPings[sequenceNumber]
                     if (ping != null) {
+                        val timestampStr = resultTimestampFormat.format(java.util.Date(ping.sentTime))
+
                         if (rtt < timeout) {
                             packetsReceived++
                             totalRtt += rtt.toDouble()
@@ -350,9 +355,33 @@ class PingService : Service() {
                                 else -> 64L
                             }
 
-                            log("RECV ACK - Seq: $sequenceNumber ")// | RTT: ${rtt}ms | Location: ${ping.location} | Network: ${ping.networkType}")
+                            log("RECV ACK - Seq: $sequenceNumber  | RTT: ${rtt}ms")// | Location: ${ping.location} | Network: ${ping.networkType}")
+
+                            // Create the CORRECT PingResult
+                            pingResults.add(PingResult(
+                                timestamp = timestampStr,
+                                sequence = sequenceNumber,
+                                success = true,
+                                rttMs = rtt.toDouble(),
+                                location = ping.location,
+                                networkType = ping.networkType,
+                                errorMessage = ""
+                            ))
+
                         } else {
-                            log("TIMEOUT - Seq: $sequenceNumber ")// | RTT: ${rtt}ms (exceeded ${timeout}ms) | Location: ${ping.location}")
+                            log("TIMEOUT - Seq: $sequenceNumber | (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
+
+                            // Create the CORRECT PingResult for timeout
+                            pingResults.add(PingResult(
+                                timestamp = timestampStr,
+                                sequence = sequenceNumber,
+                                success = false,
+                                rttMs = null,
+                                location = ping.location,
+                                networkType = ping.networkType,
+                                errorMessage = "Timeout"
+                            ))
+
                         }
                         pendingPings.remove(sequenceNumber)
                     }
@@ -373,7 +402,18 @@ class PingService : Service() {
                     val elapsedTime = currentTime - ping.sentTime
 
                     if (elapsedTime > timeout * 2) { // Allow extra time for async processing
-                        log("TIMEOUT - Seq: $seqNum ")// | Waited: ${elapsedTime}ms (exceeded ${timeout}ms) | Location: ${ping.location}")
+                        val timestampStr = resultTimestampFormat.format(java.util.Date(ping.sentTime))
+                        pingResults.add(PingResult(
+                            timestamp = timestampStr,
+                            sequence = ping.sequenceNumber,
+                            success = false,
+                            rttMs = null,
+                            location = ping.location,
+                            networkType = ping.networkType,
+                            errorMessage = "Timeout (Cleanup)"
+                        ))
+
+                        log("TIMEOUT - Seq: $seqNum | Waited: ${elapsedTime}ms (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
                         iterator.remove()
                     }
                 }

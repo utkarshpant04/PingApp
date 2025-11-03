@@ -434,7 +434,7 @@ class ApiService : Service() {
                         } catch (e: Exception) {
                             Log.w(TAG, "Keep-alive failed: ${e.message}")
                         }
-                        delay(10_000)
+                        delay(5_000)
                     }
                 }
 
@@ -1216,7 +1216,7 @@ data class PingResult(
     val timestamp: String,
     val sequence: Int,
     val success: Boolean,
-    val rttMs: Double,
+    val rttMs: Double?,
     val location: String = "N/A",
     val networkType: String = "Unknown",  // NEW FIELD
     val errorMessage: String = ""

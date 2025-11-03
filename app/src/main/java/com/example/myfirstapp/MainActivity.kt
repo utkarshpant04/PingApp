@@ -428,7 +428,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         appendLog("═══════════════════════════════════════")
                         appendLog("✓ Connected to server successfully")
                         appendLog("📍 Location: $location")
-                        appendLog("💓 Heartbeat: Every 5 minutes")
+//                        appendLog("💓 Heartbeat: Every 5 minutes")
                         appendLog("⏳ Waiting for server instructions...")
                         appendLog("═══════════════════════════════════════")
 
@@ -525,7 +525,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             appendLog("📋 Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
 
             // Execute ping as instructed by server
-            appendLog("Line 522: MainActivity.kt")
+//            appendLog("Line 522: MainActivity.kt")
             pingService?.executePingInstruction(
                 instruction.host,
                 instruction.protocol,
