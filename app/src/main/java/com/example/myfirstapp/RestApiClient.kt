@@ -15,9 +15,6 @@ import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -26,9 +23,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.net.DatagramSocket
 import java.net.DatagramPacket
 import java.net.InetSocketAddress
-import java.net.SocketException
-import java.net.SocketTimeoutException
-import java.net.BindException
 import java.util.UUID
 
 
@@ -85,6 +79,9 @@ class ApiService : Service() {
 
     // Failed upload queue - thread-safe
     private val failedUploadQueue = ConcurrentLinkedQueue<FailedUploadItem>()
+    // Queue to store ACK batches that failed to upload
+    private val failedAckBatchQueue = ConcurrentLinkedQueue<List<JSONObject>>()
+
 
     // Callbacks
     private var statusCallback: ((String, String) -> Unit)? = null
@@ -371,96 +368,81 @@ class ApiService : Service() {
         startDelayMs: Long = 0L,
         activeDurationMs: Long = 60_000L // 1 minute default
     ) {
-        // Don’t start if already running
         if (udpListenerJob?.isActive == true) {
-            udpListenerJob?.cancel()  // stop the existing listener
+            udpListenerJob?.cancel()
             udpListenerJob = null
         }
 
         udpListenerJob = serviceScope.launch(Dispatchers.IO) {
-            if (startDelayMs > 0) {
-                Log.i(TAG, "Delaying UDP listener start by ${startDelayMs}ms")
-                delay(startDelayMs)
-            }
+            if (startDelayMs > 0) delay(startDelayMs)
+
+            val ackBatch = mutableListOf<JSONObject>() // store all ACK metadata
+            var ackCount = 0 // 👈 counter for total ACKs sent
 
             try {
-                // Create socket
                 udpListenerSocket = DatagramSocket(0)
                 udpListenerPort = udpListenerSocket?.localPort ?: 0
                 udpListenerSocket?.soTimeout = 0
 
-                log("UDP Listener started")// on port $udpListenerPort (duration = ${activeDurationMs}ms)")
+                log("UDP Listener started on port $udpListenerPort")
 
                 val serverAddress = InetSocketAddress("170.187.252.25", SERVER_UDP_PORT)
-
-                // 1. Generate a unique session ID for this listener instance
                 val sessionId = UUID.randomUUID().toString()
-                // 2. Create the "READY" notification message with the session_id
+
+                // READY message
                 val readyMessage = JSONObject().apply {
                     put("device_id", deviceId)
                     put("client_id", clientId ?: "unknown")
                     put("message", "READY_FOR_PINGS")
                     put("listener_port", udpListenerPort)
-                    put("session_id", sessionId) // Add the unique session ID
+                    put("session_id", sessionId)
                 }.toString().toByteArray()
+
                 val readyPacket = DatagramPacket(readyMessage, readyMessage.size, serverAddress)
-                // 3. Send the "READY" notification 5 times
-                log("Sending READY notifications")// (Session: $sessionId) to server at $serverAddress")
-                repeat(5) { i ->
-                    try {
-                        udpListenerSocket?.send(readyPacket)
-//                        Log.i(TAG, "Sent READY notification (Attempt ${i + 1}/5)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to send READY (Attempt ${i + 1}/5): ${e.message}")
-                        // Optional: Add a small delay before retrying
-                        // delay(100)
-                    }
+                repeat(5) {
+                    try { udpListenerSocket?.send(readyPacket) }
+                    catch (e: Exception) { Log.w(TAG, "Failed to send READY: ${e.message}") }
                 }
 
-                // Start NAT keep-alive
+                // NAT keep-alive
                 launch {
                     while (isActive) {
                         try {
-                            val keepAliveMsg = JSONObject().apply {
+                            val keepAlive = JSONObject().apply {
                                 put("device_id", deviceId)
                                 put("client_id", clientId ?: "unknown")
                                 put("message", "KEEP_ALIVE")
                                 put("listener_port", udpListenerPort)
                             }.toString().toByteArray()
-
-                            val keepAlivePacket = DatagramPacket(keepAliveMsg, keepAliveMsg.size, serverAddress)
-                            udpListenerSocket?.send(keepAlivePacket)
-                            Log.d(TAG, "Sent NAT keep-alive to server (port $udpListenerPort)")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Keep-alive failed: ${e.message}")
-                        }
+                            udpListenerSocket?.send(DatagramPacket(keepAlive, keepAlive.size, serverAddress))
+                        } catch (_: Exception) {}
                         delay(5_000)
                     }
                 }
 
-                // Schedule auto-stop after timeout
+                // Auto-stop listener
                 listenerTimeoutJob = launch {
                     delay(activeDurationMs)
-//                    Log.i(TAG, "UDP Listener timeout reached (${activeDurationMs}ms) — stopping now")
                     stopUdpListener()
                 }
 
                 // Main receive loop
                 val buffer = ByteArray(4096)
-                val receivePacket = DatagramPacket(buffer, buffer.size)
+                val packet = DatagramPacket(buffer, buffer.size)
 
                 while (isActive && isConnectedToServer) {
                     try {
-                        udpListenerSocket?.receive(receivePacket)
-                        val data = String(receivePacket.data, 0, receivePacket.length, Charsets.UTF_8)
-                        val senderAddress = receivePacket.socketAddress
-                        val receiveTime = System.currentTimeMillis()
+                        udpListenerSocket?.receive(packet)
+                        val data = String(packet.data, 0, packet.length, Charsets.UTF_8)
+                        val senderAddress = packet.socketAddress
+                        val recvTime = System.currentTimeMillis()
                         Log.i(TAG, "UDP RECV: From $senderAddress - Data: $data")
 
                         try {
                             val pingData = JSONObject(data)
                             val seq = pingData.optInt("sequence", -1)
 
+                            // Send ACK
                             val ack = JSONObject().apply {
                                 put("device_id", deviceId)
                                 put("client_id", clientId ?: "unknown")
@@ -468,28 +450,51 @@ class ApiService : Service() {
                                 put("sequence", seq)
                             }.toString().toByteArray()
 
-                            val ackPacket = DatagramPacket(ack, ack.size, senderAddress)
-                            udpListenerSocket?.send(ackPacket)
-                            log("SENT ACK to Server: Seq=$seq")
-                        } catch (e: Exception) {
-                            val simpleAck = "ACK:${System.currentTimeMillis()}".toByteArray()
-                            udpListenerSocket?.send(DatagramPacket(simpleAck, simpleAck.size, senderAddress))
-                        }
+                            udpListenerSocket?.send(DatagramPacket(ack, ack.size, senderAddress))
 
+                            ackCount++ // 👈 increment ACK count
+                            if (ackCount % 10 == 0) { // print every 10 ACKs, adjust as needed
+                                Log.i(TAG, "Total ACKs sent so far: $ackCount")
+                            }
+
+                            // Store metadata for later upload
+                            val ackMeta = JSONObject().apply {
+                                put("session_id", pingData.optString("session_id", sessionId))
+                                put("client_id", clientId ?: "unknown")
+                                put("timestamp", System.currentTimeMillis())
+                                put("sequence_number", seq)
+                                put("network", NetworkUtils.getNetworkType(applicationContext))
+                                put("location", locationCallback?.invoke() ?: "N/A")
+                                put("ack_sent_time", System.currentTimeMillis())
+                                put("ack_received_time", recvTime)
+                            }
+                            ackBatch.add(ackMeta)
+
+                        } catch (e: Exception) {
+                            Log.w(TAG, "ACK handling error: ${e.message}")
+                        }
                     } catch (e: Exception) {
                         Log.w(TAG, "UDP listener error: ${e.message}")
                     }
                 }
+
             } catch (e: Exception) {
                 Log.e(TAG, "UDP Listener failed: ${e.message}", e)
             } finally {
+                // --- Upload batch once at the end ---
+                if (ackBatch.isNotEmpty()) {
+                    uploadAckBatchOnce(ackBatch)
+                }
+
+                log("UDP Listener stopped — total ACKs sent: $ackCount") // 👈 final count
                 udpListenerSocket?.close()
                 udpListenerSocket = null
                 udpListenerPort = 0
-                Log.i(TAG, "UDP Listener stopped")
             }
         }
+
     }
+
 
 
     private fun stopUdpListener() {
@@ -752,6 +757,7 @@ class ApiService : Service() {
                     if (isConnectedToServer && !isInReconnectMode) {
                         // Before sending heartbeat, retry failed uploads
                         retryFailedUploads()
+                        retryFailedAckBatches()
 
                         // Normal heartbeat mode
                         val nextHeartbeatDelay = HEARTBEAT_INTERVAL_MS - delayUsed
@@ -1007,10 +1013,10 @@ class ApiService : Service() {
                     put("duration_seconds", sessionData.durationSeconds)
                     put("packets_sent", sessionData.packetsSent)
                     put("packets_received", sessionData.packetsReceived)
-                    put("packet_loss_percent", sessionData.packetLossPercent)
-                    put("avg_rtt_ms", sessionData.avgRttMs)
-                    put("min_rtt_ms", sessionData.minRttMs)
-                    put("max_rtt_ms", sessionData.maxRttMs)
+//                    put("packet_loss_percent", sessionData.packetLossPercent)
+//                    put("avg_rtt_ms", sessionData.avgRttMs)
+//                    put("min_rtt_ms", sessionData.minRttMs)
+//                    put("max_rtt_ms", sessionData.maxRttMs)
                     put("total_bytes", sessionData.totalBytes)
                     put("avg_bandwidth_bps", sessionData.avgBandwidthBps)
                     put("start_location", sessionData.startLocation)
@@ -1033,7 +1039,9 @@ class ApiService : Service() {
                                 put("timestamp", result.timestamp)
                                 put("sequence", result.sequence)
                                 put("success", result.success)
-                                put("rtt_ms", result.rttMs)
+//                                put("rtt_ms", result.rttMs)
+                                put("sent_timestamp_ms", result.sentTimestampMs)
+                                put("received_timestamp_ms", result.receivedTimestampMs)
                                 put("location", result.location)
                                 put("network_type", result.networkType)
                                 put("error_message", result.errorMessage)
@@ -1088,6 +1096,88 @@ class ApiService : Service() {
             }
         }
     }
+
+    private fun uploadAckBatchOnce(ackBatch: List<JSONObject>) {
+        serviceScope.launch(Dispatchers.IO) {
+            val batchJson = JSONObject().apply {
+                put("acks", JSONArray(ackBatch))
+            }
+
+            try {
+                val url = URL("$SERVER_BASE_URL/upload-ack-session-batch")
+                val conn = createConnection(url, "POST")
+                conn.outputStream.use { os -> os.write(batchJson.toString().toByteArray()) }
+
+                val code = conn.responseCode
+                val response = if (code == HttpURLConnection.HTTP_OK) {
+                    conn.inputStream.bufferedReader().use { it.readText() }
+                } else {
+                    conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
+                }
+                conn.disconnect()
+
+                if (code == HttpURLConnection.HTTP_OK) {
+                    log("✅ Uploaded ${ackBatch.size} ACK records successfully at end")
+                } else {
+                    log("⚠️ Failed to upload ACK batch ($code): $response — queued for retry")
+                    addAckBatchToRetry(ackBatch)
+                }
+            } catch (e: Exception) {
+                log("❌ Exception uploading ACK batch: ${e.message}")
+                addAckBatchToRetry(ackBatch)
+            }
+        }
+    }
+    private fun addAckBatchToRetry(batch: List<JSONObject>) {
+        if (batch.isEmpty()) return
+
+        if (failedAckBatchQueue.size >= 100) {
+            failedAckBatchQueue.poll() // prevent unlimited growth
+            log("⚠️ ACK retry queue full — dropping oldest batch")
+        }
+
+        failedAckBatchQueue.offer(batch)
+        log("📦 Queued failed ACK batch (${batch.size} records) for retry")
+    }
+
+    private suspend fun retryFailedAckBatches() {
+        if (failedAckBatchQueue.isEmpty()) return
+
+        val total = failedAckBatchQueue.size
+        log("🔁 Retrying $total failed ACK batches")
+
+        val retryList = mutableListOf<List<JSONObject>>()
+
+        while (failedAckBatchQueue.isNotEmpty()) {
+            val batch = failedAckBatchQueue.poll() ?: continue
+            try {
+                val batchJson = JSONObject().apply { put("acks", JSONArray(batch)) }
+                val url = URL("$SERVER_BASE_URL/upload-ack-session-batch")
+                val conn = createConnection(url, "POST")
+                conn.outputStream.use { it.write(batchJson.toString().toByteArray()) }
+
+                val code = conn.responseCode
+                conn.disconnect()
+
+                if (code == HttpURLConnection.HTTP_OK) {
+                    log("✅ Reuploaded ACK batch (${batch.size} records)")
+                } else {
+                    log("⚠️ ACK batch reupload failed ($code) — will retry later")
+                    retryList.add(batch)
+                }
+            } catch (e: Exception) {
+                log("❌ Exception retrying ACK batch: ${e.message}")
+                retryList.add(batch)
+            }
+        }
+
+        retryList.forEach { failedAckBatchQueue.offer(it) }
+
+        log("🔁 ACK batch retry complete — ${failedAckBatchQueue.size} remaining")
+    }
+
+
+
 
     /**
      * Check if heartbeat is currently active
@@ -1216,7 +1306,9 @@ data class PingResult(
     val timestamp: String,
     val sequence: Int,
     val success: Boolean,
-    val rttMs: Double?,
+//    val rttMs: Double?,
+    val sentTimestampMs: Long,
+    val receivedTimestampMs: Long?,
     val location: String = "N/A",
     val networkType: String = "Unknown",  // NEW FIELD
     val errorMessage: String = ""

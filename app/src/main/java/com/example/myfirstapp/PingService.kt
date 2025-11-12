@@ -16,7 +16,6 @@ import java.io.InputStreamReader
 import java.net.*
 import java.util.UUID
 import kotlin.system.measureTimeMillis
-import kotlin.random.Random
 import java.util.concurrent.ConcurrentHashMap
 
 // Method 1: Using UUID (Most Reliable)
@@ -211,7 +210,7 @@ class PingService : Service() {
     fun updateSettings(packetSize: Int, timeout: Int) {
         this.packetSize = packetSize
         this.timeout = timeout
-        log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms")
+//        log("Settings updated: Packet=$packetSize, Timeout=${timeout}ms")
     }
 
     fun startServerControlledMode() {
@@ -324,7 +323,7 @@ class PingService : Service() {
                     networkType = networkType
                 )
 
-                log("SENT UDP Packet - Seq: $sequenceNumber ")// | Host: $host | Protocol: $protocol | Location: $currentLoc | Network: $networkType")
+//                log("SENT UDP Packet - Seq: $sequenceNumber ")// | Host: $host | Protocol: $protocol | Location: $currentLoc | Network: $networkType")
 
                 // Send ping asynchronously without waiting
                 serviceScope.launch {
@@ -332,7 +331,7 @@ class PingService : Service() {
                         when (protocol.uppercase()) {
                             "ICMP", "PING" -> icmpPingCmd(host)
                             "TCP" -> tcpPing(host, tcpPort)
-                            "UDP" -> udpPing(host, udpPort, timeout)
+                            "UDP" -> udpPing(host, udpPort, timeout, sequenceNumber, sessionId)
                             else -> tcpPing(host, tcpPort)
                         }
                     }
@@ -355,28 +354,33 @@ class PingService : Service() {
                                 else -> 64L
                             }
 
-                            log("RECV ACK - Seq: $sequenceNumber  | RTT: ${rtt}ms")// | Location: ${ping.location} | Network: ${ping.networkType}")
+//                            log("RECV ACK - Seq: $sequenceNumber  | RTT: ${rtt}ms")// | Location: ${ping.location} | Network: ${ping.networkType}")
 
                             // Create the CORRECT PingResult
+                            val receivedTime = ping.sentTime + rtt
                             pingResults.add(PingResult(
                                 timestamp = timestampStr,
                                 sequence = sequenceNumber,
                                 success = true,
-                                rttMs = rtt.toDouble(),
+//                                rttMs = rtt.toDouble(),
+                                sentTimestampMs = ping.sentTime,      // <-- ADDED
+                                receivedTimestampMs = receivedTime,
                                 location = ping.location,
                                 networkType = ping.networkType,
                                 errorMessage = ""
                             ))
 
                         } else {
-                            log("TIMEOUT - Seq: $sequenceNumber | (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
+//                            log("TIMEOUT - Seq: $sequenceNumber | (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
 
                             // Create the CORRECT PingResult for timeout
                             pingResults.add(PingResult(
                                 timestamp = timestampStr,
                                 sequence = sequenceNumber,
                                 success = false,
-                                rttMs = null,
+//                                rttMs = null,
+                                sentTimestampMs = ping.sentTime,
+                                receivedTimestampMs = null,
                                 location = ping.location,
                                 networkType = ping.networkType,
                                 errorMessage = "Timeout"
@@ -407,13 +411,15 @@ class PingService : Service() {
                             timestamp = timestampStr,
                             sequence = ping.sequenceNumber,
                             success = false,
-                            rttMs = null,
+//                            rttMs = null,
+                            sentTimestampMs = ping.sentTime,
+                            receivedTimestampMs = null,
                             location = ping.location,
                             networkType = ping.networkType,
                             errorMessage = "Timeout (Cleanup)"
                         ))
 
-                        log("TIMEOUT - Seq: $seqNum | Waited: ${elapsedTime}ms (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
+//                        log("TIMEOUT - Seq: $seqNum | Waited: ${elapsedTime}ms (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
                         iterator.remove()
                     }
                 }
@@ -457,7 +463,7 @@ class PingService : Service() {
         val finalLocation = locationCallback?.invoke() ?: currentLocation
         currentLocation = finalLocation
 
-        log("INSTRUCTION COMPLETE - Sent: $packetsSent, Received: $packetsReceived  ")//, Loss: ${loss.toInt()}%, Avg RTT: ${avgRtt.toInt()}ms, Avg BW: ${formatBandwidth(bandwidth)} | Final Location: $finalLocation")
+        log("INSTRUCTION COMPLETE - Sent: $packetsSent, Received: $packetsReceived  , Loss: ${loss.toInt()}%, Avg RTT: ${avgRtt.toInt()}ms, Avg BW: ${formatBandwidth(bandwidth)}")// | Final Location: $finalLocation")
 
         val sessionData = PingSessionData(
             sessionId = sessionId,
@@ -584,11 +590,12 @@ class PingService : Service() {
         }
     }
 
-    private fun udpPing(host: String, port: Int, timeout: Int): Boolean {
+    private fun udpPing(host: String, port: Int, timeout: Int, seq: Int, sessionId: String): Boolean {
         return try {
             DatagramSocket().use { socket ->
                 socket.soTimeout = timeout
-                val sendData = ByteArray(packetSize) { 'A'.code.toByte() }
+                val dataString = "$sessionId,$seq"
+                val sendData = dataString.toByteArray(Charsets.UTF_8)
                 val packet = DatagramPacket(sendData, sendData.size, InetAddress.getByName(host), port)
                 socket.send(packet)
 

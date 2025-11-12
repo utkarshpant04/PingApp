@@ -69,10 +69,6 @@ class PingDataServer:
                     duration_seconds INTEGER,
                     packets_sent INTEGER,
                     packets_received INTEGER,
-                    packet_loss_percent REAL,
-                    avg_rtt_ms REAL,
-                    min_rtt_ms REAL,
-                    max_rtt_ms REAL,
                     total_bytes BIGINT,
                     avg_bandwidth_bps REAL,
                     start_location TEXT,
@@ -90,11 +86,26 @@ class PingDataServer:
                     timestamp TEXT,
                     sequence_number INTEGER,
                     success BOOLEAN,
-                    rtt_ms REAL,
+                    sent_timestamp_ms BIGINT,
+                    received_timestamp_ms BIGINT,
                     location TEXT,
                     network_type TEXT,
                     error_message TEXT,
                     FOREIGN KEY (session_id) REFERENCES ping_sessions (session_id)
+                )
+            ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS ack_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    client_id TEXT,
+                    timestamp TEXT,
+                    sequence_number INTEGER,
+                    network TEXT,
+                    location TEXT,
+                    ack_sent_time TEXT,
+                    ack_received_time TEXT
                 )
             ''')
 
@@ -173,7 +184,7 @@ class PingDataServer:
             instruction = random.choice(self.ping_instructions)
 
             # Generate delay using separate function
-            instruction['delay_ms'] = get_instruction_delay(average_seconds=30.0*60)
+            instruction['delay_ms'] = get_instruction_delay(average_seconds=30*60)
 
             return instruction
         return None
@@ -234,17 +245,14 @@ class PingDataServer:
                 cursor.execute('''
                     INSERT or REPLACE INTO ping_sessions
                     (session_id, client_id, host, protocol, start_time, end_time,
-                     duration_seconds, packets_sent, packets_received, packet_loss_percent,
-                     avg_rtt_ms, min_rtt_ms, max_rtt_ms, total_bytes, avg_bandwidth_bps,
+                     duration_seconds, packets_sent, packets_received, total_bytes, avg_bandwidth_bps,
                      start_location, end_location, settings_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     session_data['session_id'], session_data['client_id'], session_data['host'],
                     session_data['protocol'], session_data['start_time'], session_data['end_time'],
                     session_data['duration_seconds'], session_data['packets_sent'],
-                    session_data['packets_received'], session_data['packet_loss_percent'],
-                    session_data.get('avg_rtt_ms', 0), session_data.get('min_rtt_ms', 0),
-                    session_data.get('max_rtt_ms', 0), session_data.get('total_bytes', 0),
+                    session_data['packets_received'], session_data.get('total_bytes', 0),
                     session_data.get('avg_bandwidth_bps', 0), session_data.get('start_location', 'N/A'),
                     session_data.get('end_location', 'N/A'), json.dumps(session_data.get('settings', {}))
                 ))
@@ -263,12 +271,13 @@ class PingDataServer:
                     for result in session_data['ping_results']:
                         cursor.execute('''
                             INSERT INTO ping_results
-                            (session_id, timestamp, sequence_number, success, rtt_ms, location, network_type, error_message)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            (session_id, timestamp, sequence_number, success, sent_timestamp_ms, received_timestamp_ms, location, network_type, error_message)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             session_data['session_id'], result.get('timestamp', ''),
                             result.get('sequence', 0), result.get('success', False),
-                            result.get('rtt_ms', 0), result.get('location', 'N/A'),
+                            result.get('sent_timestamp_ms', 0), result.get('received_timestamp_ms', None),
+                            result.get('location', 'N/A'),
                             result.get('network_type', 'Unknown'),
                             result.get('error_message', '')
                         ))
@@ -280,6 +289,30 @@ class PingDataServer:
             except Exception as e:
                 logger.error(f"Error storing session data: {e}")
                 return False
+
+    def store_ack_sessions(self, ack_list):
+            with self.lock:
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    for ack in ack_list:
+                        cursor.execute('''
+                            INSERT INTO ack_sessions
+                            (session_id, client_id, timestamp, sequence_number,
+                             network, location, ack_sent_time, ack_received_time)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            ack.get('session_id'), ack.get('client_id'),
+                            ack.get('timestamp'), ack.get('sequence_number'),
+                            ack.get('network'), ack.get('location'),
+                            ack.get('ack_sent_time'), ack.get('ack_received_time')
+                        ))
+                    conn.commit()
+                    conn.close()
+                    return len(ack_list)
+                except Exception as e:
+                    logger.error(f"Error storing ACK sessions: {e}")
+                    return 0
 
     def get_client_stats(self, client_id=None):
         """Get statistics for specific client or all clients"""
@@ -343,6 +376,7 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             self.handle_ping()
         elif path == '/api/clients':
             self.handle_get_clients()
+
         elif path.startswith('/api/clients/'):
             client_id = path.split('/')[-1]
             self.handle_get_client_data(client_id)
@@ -360,6 +394,8 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
             self.handle_heartbeat()
         elif path == '/api/upload-session':
             self.handle_upload_session()
+        elif path == '/api/upload-ack-session-batch':
+                    self.handle_upload_acks()
         else:
             self.send_json_error(404, "Endpoint not found")
 
@@ -515,7 +551,7 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
                     "instruction_id": f"inst_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                     "delay_ms": instruction["delay_ms"]
                 })
-                logger.info(f"Sent ping instruction to {client_id}: {instruction['host']} ({instruction['protocol']})")
+                logger.info(f"Sent ping instruction to {client_id}: {instruction['host']} ({instruction["delay_ms"]}ms)")
             else:
                 # Fallback (should not happen)
                 response.update({
@@ -570,6 +606,14 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Unexpected upload error: {e}")
             self.send_json_error(500, "Internal server error")
+
+    def handle_upload_acks(self):
+        try:
+            data = self.parse_json_body()
+            inserted = db.store_ack_sessions(data.get('acks', []))
+            self.send_json_response(200, {"status": "ok", "inserted": inserted})
+        except Exception as e:
+            self.send_json_error(500, f"ACK upload failed: {e}")
 
     def handle_get_clients(self):
         """Get all clients data"""
@@ -656,7 +700,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Simple Ping REST API Server')
     parser.add_argument('--port', type=int, default=12345, help='Server port (default: 8080)')
-    parser.add_argument('--db', type=str, default='ping_data.db', help='Database file path')
+    parser.add_argument('--db', type=str, default='ping_data2.db', help='Database file path')
     args = parser.parse_args()
 
     db = PingDataServer(args.db)
