@@ -437,7 +437,7 @@ class PingService : Service() {
                     updateNotification()
                 }
 
-                delay(500) // Check for timeouts every 500ms
+                delay(50) // Check for timeouts every 500ms
             }
         }
 

@@ -33,7 +33,7 @@ class PingDataServer:
 
     def load_default_ping_instructions(self):
         return [
-            {"host": "170.187.252.25", "protocol": "UDP", "duration_seconds": 15, "interval_ms": 500, "delay_ms": 5000},
+            {"host": "170.187.252.25", "protocol": "UDP", "duration_seconds": 15, "interval_ms": 50, "delay_ms": 5000},
         ]
 
     def init_database(self):

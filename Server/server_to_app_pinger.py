@@ -18,8 +18,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DB_NAME = 'ping_data2.db'
-PING_INTERVAL = 1          # seconds between pings
-SESSION_DURATION = 30      # total seconds per client
+PING_INTERVAL = 0.05        # seconds between pings
+SESSION_DURATION = 15      # total seconds per client
 SERVER_PORT = 50003
 BUFFER_SIZE = 4096
 PING_TIMEOUT_MS = 5000     # 🔹 consider ping lost after 5 seconds

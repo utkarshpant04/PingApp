@@ -1,6 +1,7 @@
 package com.example.myfirstapp
 
 import android.app.*
+import kotlin.math.max
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
@@ -850,8 +851,7 @@ class ApiService : Service() {
 
                     // Check for server instructions
                     if (data.optBoolean("send_ping", false)) {
-                        val delayMs = data.optLong("delay_ms", 0)
-
+                        val delayMs = max(data.optLong("delay_ms", 0), HEARTBEAT_INTERVAL_MS - 120_000L)
                         val instruction = ServerInstruction(
                             sendPing = true,
                             host = data.getStringOrDefault("ping_host"),
@@ -872,7 +872,7 @@ class ApiService : Service() {
                         }
 
                         // Apply delay before executing instruction
-                        if (delayMs > 0) {
+                        if (delayMs > 0 ) {
                             Log.i(TAG, "Waiting ${delayMs}ms before executing instruction...")
                             delay(delayMs)
                             delayUsed = delayMs
