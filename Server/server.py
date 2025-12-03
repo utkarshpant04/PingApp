@@ -184,7 +184,7 @@ class PingDataServer:
             instruction = random.choice(self.ping_instructions)
 
             # Generate delay using separate function
-            instruction['delay_ms'] = get_instruction_delay(average_seconds=30*60)
+            instruction['delay_ms'] = get_instruction_delay(average_seconds=30*15)
 
             return instruction
         return None

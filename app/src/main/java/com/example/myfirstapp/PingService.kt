@@ -30,15 +30,10 @@ data class PendingPing(
     val networkType: String
 )
 
-
-// Add these variables to the top of your PingService class
-private var udpListenerJob: Job? = null
-private var udpSocket: DatagramSocket? = null
 class PingService : Service() {
 
     companion object {
         private const val TAG = "PingService"
-        private const val LISTENER_PORT = 50002
     }
 
     private val CHANNEL_ID = "PingServiceChannel"
@@ -72,13 +67,13 @@ class PingService : Service() {
         timeZone = java.util.TimeZone.getTimeZone("UTC")
     }
     // Ping interval tracking
-    private var pingIntervalMs = 100L // Duration between two consecutive pings
+    private var pingIntervalMs = Constants.DEFAULT_PING_INTERVAL_MS // Duration between two consecutive pings
 
     // Settings
     private var packetSize = 32
-    private var timeout = 1000
+    private var timeout = Constants.DEFAULT_TIMEOUT_MS
     private var tcpPort = 80
-    private var udpPort = 50002
+    private var udpPort = Constants.PING_LISTENER_PORT
 
     // Pending pings awaiting ACK (sequence number -> ping data)
     private val pendingPings = ConcurrentHashMap<Int, PendingPing>()
@@ -437,7 +432,7 @@ class PingService : Service() {
                     updateNotification()
                 }
 
-                delay(50) // Check for timeouts every 500ms
+                delay(500) // Check for timeouts every 500ms
             }
         }
 

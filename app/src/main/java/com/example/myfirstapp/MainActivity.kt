@@ -45,9 +45,9 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     // Configurable defaults for ping settings
     private var packetSize = 32
-    private var timeout = 1000
+    private var timeout = Constants.DEFAULT_TIMEOUT_MS
     private var tcpPort = 80
-    private var udpPort = 50002
+    private var udpPort = Constants.PING_LISTENER_PORT
 
     // New location toggle variables and SharedPreferences
     private val PREFS_NAME = "MyPrefs"
@@ -338,68 +338,22 @@ class MainActivity : AppCompatActivity(), LocationListener {
     // LocationListener methods
     override fun onLocationChanged(location: Location) {
         // Only update if the new location is significantly better
-        if (isBetterLocation(location, currentLocation)) {
-            val previousLocation = currentLocation?.let { "%.6f,%.6f".format(it.latitude, it.longitude) } ?: "N/A"
+//        if (isBetterLocation(location, currentLocation)) {
+//            val previousLocation = currentLocation?.let { "%.6f,%.6f".format(it.latitude, it.longitude) } ?: "N/A"
             currentLocation = location
-            val newLocationString = getCurrentLocationString()
+//            val newLocationString = getCurrentLocationString()
 
             // Log location change
 //            appendLog("Location updated: $newLocationString (was: $previousLocation)")
-        }
+//        }
     }
 
-    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
     override fun onProviderEnabled(provider: String) {
         appendLog("Location provider enabled: $provider")
     }
     override fun onProviderDisabled(provider: String) {
         appendLog("Location provider disabled: $provider")
     }
-
-    /**
-     * Determines whether one location reading is better than the current location fix
-     */
-    private fun isBetterLocation(location: Location, currentBestLocation: Location?): Boolean {
-        if (currentBestLocation == null) {
-            // A new location is always better than no location
-            return true
-        }
-
-        // Check whether the new location fix is newer or older
-        val timeDelta = location.time - currentBestLocation.time
-        val isSignificantlyNewer = timeDelta > 2 * 60 * 1000 // 2 minutes
-        val isSignificantlyOlder = timeDelta < -2 * 60 * 1000
-        val isNewer = timeDelta > 0
-
-        // If it's been more than two minutes since the current location, use the new location
-        // because the user has likely moved
-        if (isSignificantlyNewer) {
-            return true
-            // If the new location is more than two minutes older, it must be worse
-        } else if (isSignificantlyOlder) {
-            return false
-        }
-
-        // Check whether the new location fix is more or less accurate
-        val accuracyDelta = (location.accuracy - currentBestLocation.accuracy).toInt()
-        val isLessAccurate = accuracyDelta > 0
-        val isMoreAccurate = accuracyDelta < 0
-        val isSignificantlyLessAccurate = accuracyDelta > 200
-
-        // Check if the old and new location are from the same provider
-        val isFromSameProvider = location.provider == currentBestLocation.provider
-
-        // Determine location quality using a combination of timeliness and accuracy
-        if (isMoreAccurate) {
-            return true
-        } else if (isNewer && !isLessAccurate) {
-            return true
-        } else if (isNewer && !isSignificantlyLessAccurate && isFromSameProvider) {
-            return true
-        }
-        return false
-    }
-
     // Updated getCurrentLocationString to check the location toggle
     fun getCurrentLocationString(): String {
         return if (isLocationEnabled) {
