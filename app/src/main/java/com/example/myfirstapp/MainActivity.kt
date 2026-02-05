@@ -12,6 +12,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.*
@@ -23,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.edit
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -142,6 +144,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
         btnConnect.setOnClickListener { connectToServerAndStartHeartbeat() }
         btnDisconnect.setOnClickListener { disconnectFromServer() }
 
+        // Initialize FileLogger for persistent logging
+        FileLogger.initialize(this)
+
+        // Load previous logs from file
+        loadPersistentLogs()
+
         // Load location setting from SharedPreferences
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         isLocationEnabled = prefs.getBoolean(PREF_LOCATION_ENABLED, true)
@@ -162,14 +170,41 @@ class MainActivity : AppCompatActivity(), LocationListener {
         updateUI()
     }
 
-    // Helper function to append log with timestamp and auto-scroll
-    private fun appendLog(message: String) {
-        val timestamp = dateFormatter.format(Date())
-        tvLog.append("[$timestamp] $message\n")
+    // Helper function to append log with auto-scroll
+    // Note: Timestamp is already added by the service's log() method for service logs
+    // For MainActivity's own logs, we add timestamp here
+    private fun appendLog(message: String, addTimestamp: Boolean = false) {
+        val logMessage = if (addTimestamp) {
+            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            "[$timestamp] $message"
+        } else {
+            message // Message already has timestamp from service
+        }
+
+        // Write to file
+        FileLogger.appendLog(logMessage)
+
+        // Update UI
+        tvLog.append("$logMessage\n")
         tvLog.layout?.let { layout ->
             val scrollAmount = layout.getLineTop(tvLog.lineCount)
             if (scrollAmount > tvLog.height) {
                 tvLog.scrollTo(0, scrollAmount - tvLog.height)
+            }
+        }
+    }
+
+    // Load persistent logs from file on app start
+    private fun loadPersistentLogs() {
+        val savedLogs = FileLogger.readAllLogs()
+        if (savedLogs.isNotEmpty()) {
+            tvLog.text = savedLogs
+            // Scroll to bottom
+            tvLog.layout?.let { layout ->
+                val scrollAmount = layout.getLineTop(tvLog.lineCount)
+                if (scrollAmount > tvLog.height) {
+                    tvLog.scrollTo(0, scrollAmount - tvLog.height)
+                }
             }
         }
     }
@@ -326,7 +361,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 }
 
                 if (currentLocation != null) {
-                    appendLog("Initial location: ${getCurrentLocationString()}")
+                    appendLog("Initial location: ${getCurrentLocationString()}", addTimestamp = true)
                 }
 
             } catch (e: SecurityException) {
@@ -340,19 +375,19 @@ class MainActivity : AppCompatActivity(), LocationListener {
         // Only update if the new location is significantly better
 //        if (isBetterLocation(location, currentLocation)) {
 //            val previousLocation = currentLocation?.let { "%.6f,%.6f".format(it.latitude, it.longitude) } ?: "N/A"
-            currentLocation = location
+        currentLocation = location
 //            val newLocationString = getCurrentLocationString()
 
-            // Log location change
+        // Log location change
 //            appendLog("Location updated: $newLocationString (was: $previousLocation)")
 //        }
     }
 
     override fun onProviderEnabled(provider: String) {
-        appendLog("Location provider enabled: $provider")
+        appendLog("Location provider enabled: $provider", addTimestamp = true)
     }
     override fun onProviderDisabled(provider: String) {
-        appendLog("Location provider disabled: $provider")
+        appendLog("Location provider disabled: $provider", addTimestamp = true)
     }
     // Updated getCurrentLocationString to check the location toggle
     fun getCurrentLocationString(): String {
@@ -379,12 +414,12 @@ class MainActivity : AppCompatActivity(), LocationListener {
                         Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
                         // Add connection info to existing logs (don't clear)
-                        appendLog("═══════════════════════════════════════")
-                        appendLog("✓ Connected to server successfully")
-                        appendLog("📍 Location: $location")
-//                        appendLog("💓 Heartbeat: Every 5 minutes")
-                        appendLog("⏳ Waiting for server instructions...")
-                        appendLog("═══════════════════════════════════════")
+                        appendLog("=======================================", addTimestamp = true)
+                        appendLog("Connected to server successfully", addTimestamp = true)
+                        appendLog("Location: $location", addTimestamp = true)
+//                        appendLog("Heartbeat: Every 5 minutes", addTimestamp = true)
+                        appendLog("Waiting for server instructions...", addTimestamp = true)
+                        appendLog("=======================================", addTimestamp = true)
 
                         // Start service for server-controlled operations
                         pingService?.startServerControlledMode()
@@ -414,10 +449,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
             // Stop service operations
             pingService?.stopServerControlledMode()
 
-            appendLog("═══════════════════════════════════════")
-            appendLog("✗ Disconnected from server")
-            appendLog("💔 Heartbeat stopped")
-            appendLog("═══════════════════════════════════════")
+            appendLog("=======================================", addTimestamp = true)
+            appendLog("Disconnected from server", addTimestamp = true)
+            appendLog("Heartbeat stopped", addTimestamp = true)
+            appendLog("=======================================", addTimestamp = true)
             Toast.makeText(this@MainActivity, "Disconnected from server", Toast.LENGTH_SHORT).show()
             updateUI()
         }
@@ -463,20 +498,20 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 // Update status will be handled in updateUI()
             }
             "heartbeat_error" -> {
-                appendLog("⚠️ $message")
+                appendLog("WARNING: $message", addTimestamp = true)
             }
         }
 
         // Log the message if it's informative
         if (message.isNotEmpty() && status != "heartbeat_error") {
-            appendLog("ℹ️ $message")
+            appendLog("INFO: $message", addTimestamp = true)
         }
     }
 
     private fun handleServerInstruction(instruction: ServerInstruction) {
         if (instruction.sendPing) {
             tvServerInstructions.text = "Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-            appendLog("📋 Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s")
+            appendLog("Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s", addTimestamp = true)
 
             // Execute ping as instructed by server
 //            appendLog("Line 522: MainActivity.kt")
@@ -493,7 +528,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
             )
         } else {
             tvServerInstructions.text = "Server instruction: Wait for further instructions"
-            appendLog("💡 Heartbeat sent - waiting for instructions")
+            appendLog("Heartbeat sent - waiting for instructions", addTimestamp = true)
         }
     }
 
@@ -549,6 +584,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
             }
             R.id.action_clear_logs -> {
                 clearLogs()
+                true
+            }
+            R.id.action_export_logs -> {
+                exportLogs()
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -618,7 +657,42 @@ class MainActivity : AppCompatActivity(), LocationListener {
     }
 
     private fun clearLogs() {
+        // Clear the file storage
+        FileLogger.clearLogs()
+
+        // Clear the display
         tvLog.text = ""
-        appendLog("Log cleared")
+
+        // Add a log entry indicating logs were cleared
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val clearMessage = "[$timestamp] Logs cleared"
+        FileLogger.appendLog(clearMessage)
+        tvLog.text = clearMessage
+    }
+
+    private fun exportLogs() {
+        try {
+            val logContent = FileLogger.readAllLogs()
+
+            if (logContent.isEmpty()) {
+                Toast.makeText(this, "No logs to export", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            // Method 1: Share as plain text (no FileProvider needed)
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_SUBJECT, "App Logs - ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}")
+                putExtra(Intent.EXTRA_TEXT, logContent)
+            }
+
+            startActivity(Intent.createChooser(shareIntent, "Export Logs"))
+
+            Toast.makeText(this, "Logs ready to export", Toast.LENGTH_SHORT).show()
+
+        } catch (e: Exception) {
+            Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Log.e("MainActivity", "Failed to export logs", e)
+        }
     }
 }

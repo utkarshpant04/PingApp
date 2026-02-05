@@ -536,8 +536,16 @@ class PingService : Service() {
     fun getCurrentLocation(): String = currentLocation
 
     private fun log(message: String) {
+        val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+        val logMessage = "[$timestamp] $message"
+        
         Log.i(TAG, message)
-        logCallback?.invoke(message)
+        
+        // Write to persistent file storage
+        FileLogger.appendLog(logMessage)
+        
+        // Also invoke callback for real-time display
+        logCallback?.invoke(logMessage)
     }
 
     private fun calculateBandwidth(): Double {

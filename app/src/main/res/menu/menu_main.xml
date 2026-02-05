@@ -12,4 +12,9 @@ xmlns:app="http://schemas.android.com/apk/res-auto">
     android:id="@+id/action_clear_logs"
     android:title="Clear Logs"
     app:showAsAction="never" />
+
+<item
+    android:id="@+id/action_export_logs"
+    android:title="Export Logs"
+    app:showAsAction="never" />
 </menu>
