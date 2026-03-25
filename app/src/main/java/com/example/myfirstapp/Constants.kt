@@ -3,7 +3,7 @@ package com.example.myfirstapp
 object Constants {
 
     // Ping defaults
-    const val DEFAULT_TIMEOUT_MS = 1000
+    const val DEFAULT_TIMEOUT_MS = 10000
     const val DEFAULT_PING_INTERVAL_MS = 100L
 
     // Listener ports
@@ -12,8 +12,8 @@ object Constants {
 
 
     // Heartbeat system defaults
-    const val HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000L   // 1 hr
-    const val RECONNECT_INTERVAL_MS = 1 * 60 * 1000L    // 1 min
+    const val HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000L   // 1 hr
+    const val RECONNECT_INTERVAL_MS = 2 * 60 * 1000L    // 1 min
     const val MAX_FAILED_UPLOADS = 5000
 
     // API config

@@ -14,6 +14,9 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.io.InputStreamReader
 import java.net.*
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import kotlin.system.measureTimeMillis
 import java.util.concurrent.ConcurrentHashMap
@@ -60,6 +63,7 @@ class PingService : Service() {
     private var pingResults = mutableListOf<PingResult>()
     private var minRtt = Double.MAX_VALUE
     private var maxRtt = 0.0
+    private var latestBitstring: String = ""
     private var totalRtt = 0.0
     private var startLocation = "N/A"
     // ADD THIS
@@ -77,6 +81,9 @@ class PingService : Service() {
 
     // Pending pings awaiting ACK (sequence number -> ping data)
     private val pendingPings = ConcurrentHashMap<Int, PendingPing>()
+
+    // Shared UDP socket reused for the entire ping session
+    private var sharedUdpSocket: DatagramSocket? = null
 
     // Callbacks
     private var logCallback: ((String) -> Unit)? = null
@@ -100,6 +107,8 @@ class PingService : Service() {
             Log.i(TAG, "Disconnected from ApiService")
         }
     }
+
+
 
     inner class PingBinder : Binder() {
         fun getService(): PingService = this@PingService
@@ -217,7 +226,7 @@ class PingService : Service() {
         )
         startForeground(NOTIFICATION_ID, notification)
 //        startUdpListener() // Start the new listener
-        log("Entered server-controlled mode - awaiting instructions")
+       // log("Entered server-controlled mode - awaiting instructions")
     }
 
     fun stopServerControlledMode() {
@@ -233,7 +242,7 @@ class PingService : Service() {
             pendingPings.clear()
 
             stopForeground(true)
-            log("Exited server-controlled mode")
+            //log("Exited server-controlled mode")
         }
     }
 
@@ -277,6 +286,7 @@ class PingService : Service() {
         maxRtt = 0.0
         totalRtt = 0.0
         pingIntervalMs = interval
+        latestBitstring = ""  // reset bitstring for new session
 
         this.packetSize = packetSize
         this.timeout = timeout
@@ -286,6 +296,12 @@ class PingService : Service() {
         isExecutingPingInstruction = true
         pendingPings.clear()
 
+        // Create one shared socket for the entire UDP session
+        if (protocol.uppercase() == "UDP") {
+            sharedUdpSocket?.close()
+            sharedUdpSocket = DatagramSocket().apply { soTimeout = 100 }
+        }
+
         val notification = createNotification(
             getString(R.string.executing_server_instruction, host, protocol),
             getString(R.string.ping_duration_remaining, durationSeconds)
@@ -293,45 +309,55 @@ class PingService : Service() {
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, notification)
 
-        log("Executing server ping instruction: $host ($protocol) for ${durationSeconds}s ")//- Session: $sessionId - Location: $location - Ping Interval: ${interval}ms")
+        log("Executing ($protocol) ping instruction: for ${durationSeconds}s")
 
-        val endTime = System.currentTimeMillis() + (durationSeconds * 1000)
+        val totalPingsToSend = (durationSeconds * 1000L / interval).toInt()
+        val instructionStartTime = System.currentTimeMillis()
 
-        // Launch two concurrent jobs: one for sending pings, one for receiving ACKs
         sendPingJob = serviceScope.launch {
-            var sequenceNumber = 0
+            for (sequenceNumber in 1..totalPingsToSend) {
+                if (!isActive || !isExecutingPingInstruction) break
 
-            while (isActive && System.currentTimeMillis() < endTime && isExecutingPingInstruction) {
-                sequenceNumber++
                 packetsSent++
-
                 val currentLoc = locationCallback?.invoke() ?: location
                 currentLocation = currentLoc
                 val networkType = NetworkUtils.getNetworkType(applicationContext)
                 val sentTime = System.currentTimeMillis()
 
-                // Record pending ping for ACK tracking
                 pendingPings[sequenceNumber] = PendingPing(
                     sequenceNumber = sequenceNumber,
                     sentTime = sentTime,
                     location = currentLoc,
                     networkType = networkType
                 )
+                if (protocol.uppercase() == "UDP") {
+                    // Send only — ACK handled in receiveAckJob
+                    val socket = sharedUdpSocket
+                    if (socket != null && !socket.isClosed) {
+                        try {
+                            val dataString = "$sessionId,$sequenceNumber"
+                            val sendData = dataString.toByteArray(Charsets.UTF_8)
+                            val packet = DatagramPacket(
+                                sendData,
+                                sendData.size,
+                                InetAddress.getByName(host),
+                                udpPort
+                            )
+                            socket.send(packet)
+                            Log.d(TAG, "Sending UDP packet to host=$host port=$udpPort seq=$sequenceNumber data='$dataString'")
+                        } catch (_: IOException) { }
+                    }
 
-//                log("SENT UDP Packet - Seq: $sequenceNumber ")// | Host: $host | Protocol: $protocol | Location: $currentLoc | Network: $networkType")
+                } else {
 
-                // Send ping asynchronously without waiting
-                serviceScope.launch {
-                    val rtt = measureTimeMillis {
+                    val rtt: Long = measureTimeMillis {
                         when (protocol.uppercase()) {
                             "ICMP", "PING" -> icmpPingCmd(host)
                             "TCP" -> tcpPing(host, tcpPort)
-                            "UDP" -> udpPing(host, udpPort, timeout, sequenceNumber, sessionId)
                             else -> tcpPing(host, tcpPort)
                         }
                     }
 
-                    // Check if ping is still pending (hasn't timed out yet)
                     val ping = pendingPings[sequenceNumber]
                     if (ping != null) {
                         val timestampStr = resultTimestampFormat.format(java.util.Date(ping.sentTime))
@@ -339,6 +365,7 @@ class PingService : Service() {
                         if (rtt < timeout) {
                             packetsReceived++
                             totalRtt += rtt.toDouble()
+
                             if (rtt.toDouble() < minRtt) minRtt = rtt.toDouble()
                             if (rtt.toDouble() > maxRtt) maxRtt = rtt.toDouble()
 
@@ -349,94 +376,138 @@ class PingService : Service() {
                                 else -> 64L
                             }
 
-//                            log("RECV ACK - Seq: $sequenceNumber  | RTT: ${rtt}ms")// | Location: ${ping.location} | Network: ${ping.networkType}")
-
-                            // Create the CORRECT PingResult
                             val receivedTime = ping.sentTime + rtt
-                            pingResults.add(PingResult(
-                                timestamp = timestampStr,
-                                sequence = sequenceNumber,
-                                success = true,
-//                                rttMs = rtt.toDouble(),
-                                sentTimestampMs = ping.sentTime,      // <-- ADDED
-                                receivedTimestampMs = receivedTime,
-                                location = ping.location,
-                                networkType = ping.networkType,
-                                errorMessage = ""
-                            ))
+
+                            pingResults.add(
+                                PingResult(
+                                    timestamp = timestampStr,
+                                    sequence = sequenceNumber,
+                                    success = true,
+                                    sentTimestampMs = ping.sentTime,
+                                    receivedTimestampMs = receivedTime,
+                                    location = ping.location,
+                                    networkType = ping.networkType,
+                                    errorMessage = ""
+                                )
+                            )
 
                         } else {
-//                            log("TIMEOUT - Seq: $sequenceNumber | (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
 
-                            // Create the CORRECT PingResult for timeout
-                            pingResults.add(PingResult(
-                                timestamp = timestampStr,
-                                sequence = sequenceNumber,
-                                success = false,
-//                                rttMs = null,
-                                sentTimestampMs = ping.sentTime,
-                                receivedTimestampMs = null,
-                                location = ping.location,
-                                networkType = ping.networkType,
-                                errorMessage = "Timeout"
-                            ))
-
+                            pingResults.add(
+                                PingResult(
+                                    timestamp = timestampStr,
+                                    sequence = sequenceNumber,
+                                    success = false,
+                                    sentTimestampMs = ping.sentTime,
+                                    receivedTimestampMs = null,
+                                    location = ping.location,
+                                    networkType = ping.networkType,
+                                    errorMessage = "Timeout"
+                                )
+                            )
                         }
+
                         pendingPings.remove(sequenceNumber)
                     }
                 }
 
-                delay(pingIntervalMs)
+                // Drift-corrected delay: next ping should fire at instructionStartTime + sequenceNumber * interval
+                val nextPingTargetTime = instructionStartTime + sequenceNumber * interval
+                val delayMs = nextPingTargetTime - System.currentTimeMillis()
+                if (delayMs > 0) delay(delayMs)
             }
         }
 
         receiveAckJob = serviceScope.launch {
+            val endTime = instructionStartTime + (durationSeconds * 1000L) + 1.2*timeout.toLong()
+
+            val udpReceiveJob = if (protocol.uppercase() == "UDP") launch {
+                val buffer = ByteArray(2048)
+                while (isActive && isExecutingPingInstruction) {
+                    val socket = sharedUdpSocket ?: break
+                    try {
+                        val response = DatagramPacket(buffer, buffer.size)
+                        socket.receive(response)
+                        val responseStr = String(response.data, 0, response.length, Charsets.UTF_8).trim()
+                        val parts = responseStr.split(" ")
+                        val seq = if (parts.size >= 2) parts[1].trim().toIntOrNull() else null
+                        val bitstring = if (parts.size >= 3) parts[2].trim() else null
+
+                        if (seq == null) continue
+
+                        // Always store the latest bitstring so cleanup can classify loss types
+                        if (bitstring != null) latestBitstring = bitstring
+
+                        run {
+                            val ping = pendingPings.remove(seq) ?: return@run
+                            val rtt = System.currentTimeMillis() - ping.sentTime
+                            val timestampStr = resultTimestampFormat.format(Date(ping.sentTime))
+                            packetsReceived++
+                            totalRtt += rtt.toDouble()
+                            if (rtt.toDouble() < minRtt) minRtt = rtt.toDouble()
+                            if (rtt.toDouble() > maxRtt) maxRtt = rtt.toDouble()
+                            totalBytesTransferred += packetSize.toLong() * 2
+                            pingResults.add(PingResult(
+                                timestamp = timestampStr,
+                                sequence = seq,
+                                success = true,
+                                sentTimestampMs = ping.sentTime,
+                                receivedTimestampMs = ping.sentTime + rtt,
+                                location = ping.location,
+                                networkType = ping.networkType,
+                                errorMessage = ""
+                            ))
+                        }
+                    } catch (_: SocketTimeoutException) {
+                        // Normal 100 ms poll timeout — keep looping
+                    } catch (_: IOException) {
+                        break
+                    }
+                }
+            } else null
+
             while (isActive && System.currentTimeMillis() < endTime && isExecutingPingInstruction) {
                 val currentTime = System.currentTimeMillis()
                 val iterator = pendingPings.iterator()
 
-                // Check for timeouts
                 while (iterator.hasNext()) {
-                    val (seqNum, ping) = iterator.next()
+                    val (_, ping) = iterator.next()
                     val elapsedTime = currentTime - ping.sentTime
 
-                    if (elapsedTime > timeout * 2) { // Allow extra time for async processing
+                    if (elapsedTime > timeout ) {
                         val timestampStr = resultTimestampFormat.format(java.util.Date(ping.sentTime))
+
+                        // Use latestBitstring to distinguish ACK loss vs data loss:
+                        // bitstring is 1-indexed: position (seq-1) tells us if server received the packet
+                        val serverReceivedIt = latestBitstring.length >= ping.sequenceNumber &&
+                                latestBitstring[ping.sequenceNumber - 1] == '1'
+
+                        val errorMessage = if (serverReceivedIt) "ACK Loss" else "Data Loss"
+
                         pingResults.add(PingResult(
                             timestamp = timestampStr,
                             sequence = ping.sequenceNumber,
                             success = false,
-//                            rttMs = null,
                             sentTimestampMs = ping.sentTime,
                             receivedTimestampMs = null,
                             location = ping.location,
                             networkType = ping.networkType,
-                            errorMessage = "Timeout (Cleanup)"
+                            errorMessage = errorMessage
                         ))
-
-//                        log("TIMEOUT - Seq: $seqNum | Waited: ${elapsedTime}ms (exceeded ${timeout}ms) ")// | Location: ${ping.location}")
                         iterator.remove()
                     }
                 }
-
-                val loss = if (packetsSent > 0) {
-                    ((packetsSent - packetsReceived) * 100) / packetsSent
-                } else 0
-
-                val bandwidth = calculateBandwidth()
-                val remainingTime = ((endTime - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
-
-//                log("STATS - Sent: $packetsSent, Received: $packetsReceived, Loss: $loss%, BW: ${formatBandwidth(bandwidth)} | Remaining: ${remainingTime}s")
 
                 if (packetsSent % 5 == 0) {
                     updateNotification()
                 }
 
-                delay(500) // Check for timeouts every 500ms
+                delay(500)
             }
+
+            udpReceiveJob?.cancelAndJoin()
         }
 
-        // Wait for both jobs to complete
         sendPingJob?.join()
         receiveAckJob?.join()
         finishPingInstruction()
@@ -444,21 +515,46 @@ class PingService : Service() {
 
     private suspend fun finishPingInstruction() {
         isExecutingPingInstruction = false
+        sharedUdpSocket?.close()
+        sharedUdpSocket = null
 
         val endTime = System.currentTimeMillis()
         val duration = (endTime - startTime) / 1000
 
-        val loss = if (packetsSent > 0) {
-            ((packetsSent - packetsReceived) * 100.0) / packetsSent
-        } else 0.0
-
         val avgRtt = if (packetsReceived > 0) totalRtt / packetsReceived else 0.0
         val bandwidth = calculateBandwidth()
+
+        // Jitter: average of absolute differences between consecutive successful RTTs
+        val successfulRtts = pingResults
+            .filter { it.success && it.sentTimestampMs != null && it.receivedTimestampMs != null }
+            .map { (it.receivedTimestampMs!! - it.sentTimestampMs!!).toDouble() }
+
+        val jitter = if (successfulRtts.size >= 2) {
+            successfulRtts.zipWithNext { a, b -> Math.abs(b - a) }.average()
+        } else 0.0
 
         val finalLocation = locationCallback?.invoke() ?: currentLocation
         currentLocation = finalLocation
 
-        log("INSTRUCTION COMPLETE - Sent: $packetsSent, Received: $packetsReceived  , Loss: ${loss.toInt()}%, Avg RTT: ${avgRtt.toInt()}ms, Avg BW: ${formatBandwidth(bandwidth)}")// | Final Location: $finalLocation")
+        // Three loss types
+        val ackLossCount = pingResults.count { !it.success && it.errorMessage == "ACK Loss" }
+        val dataLossCount = pingResults.count { !it.success && it.errorMessage == "Data Loss" }
+
+        val ackDenominator = packetsSent - dataLossCount
+
+        val ackLoss = if (ackDenominator > 0)
+            (ackLossCount * 100.0) / ackDenominator
+        else 0.0
+
+        val dataLoss = if (packetsSent > 0)
+            (dataLossCount * 100.0) / packetsSent
+        else 0.0
+        val currentLoss = if (packetsSent > 0) ((packetsSent - packetsReceived) * 100.0) / packetsSent else 0.0
+
+        log("INSTRUCTION COMPLETE - Sent: $packetsSent, Received: $packetsReceived, " +
+                "Current Loss: ${currentLoss.toInt()}%, ACK Loss: ${ackLoss.toInt()}%, Data Loss: ${dataLoss.toInt()}%, " +
+                "Avg RTT: ${avgRtt.toInt()}ms, Jitter: ${jitter.toInt()}ms, " +
+                "Network: ${NetworkUtils.getNetworkType(applicationContext)}")
 
         val sessionData = PingSessionData(
             sessionId = sessionId,
@@ -469,7 +565,9 @@ class PingService : Service() {
             durationSeconds = duration,
             packetsSent = packetsSent,
             packetsReceived = packetsReceived,
-            packetLossPercent = loss,
+            packetLossPercent = currentLoss,
+            ackLossPercent = ackLoss,
+            dataLossPercent = dataLoss,
             avgRttMs = avgRtt,
             minRttMs = if (minRtt == Double.MAX_VALUE) 0.0 else minRtt,
             maxRttMs = maxRtt,
@@ -492,10 +590,12 @@ class PingService : Service() {
                 val result = service.uploadPingSession(sessionData)
                 when (result) {
                     is ApiResponse.Success -> {
-                        log("Server instruction results uploaded successfully")
+                        log("Results uploaded successfully")
+                        log("=======================================", addTimestamp = false)
                     }
                     is ApiResponse.Error -> {
-                        log("Failed to upload server instruction results: ${result.message}")
+                        log("Failed to upload results: ${result.message}")
+                        log("=======================================", addTimestamp = false)
                     }
                 }
             } ?: run {
@@ -503,6 +603,7 @@ class PingService : Service() {
             }
         } catch (e: Exception) {
             log("Error uploading server instruction results: ${e.message}")
+            log("=======================================", addTimestamp = false)
         }
 
         if (isInServerControlledMode) {
@@ -516,7 +617,6 @@ class PingService : Service() {
 
         pendingPings.clear()
     }
-
     private fun stopAllOperations() {
         serviceScope.launch {
             sendPingJob?.cancelAndJoin()
@@ -535,15 +635,20 @@ class PingService : Service() {
 
     fun getCurrentLocation(): String = currentLocation
 
-    private fun log(message: String) {
-        val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
-        val logMessage = "[$timestamp] $message"
-        
+
+    private fun log(message: String, addTimestamp: Boolean = true) {
+        val logMessage = if (addTimestamp) {
+            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+            "[$timestamp] $message"
+        } else {
+            message
+        }
+
         Log.i(TAG, message)
-        
+
         // Write to persistent file storage
         FileLogger.appendLog(logMessage)
-        
+
         // Also invoke callback for real-time display
         logCallback?.invoke(logMessage)
     }
@@ -612,5 +717,28 @@ class PingService : Service() {
         } catch (e: IOException) {
             false
         }
+    }
+}
+
+
+private fun udpPing_new(host: String, port: Int, timeout: Int, seq: Int, sessionId: String): Long? {
+    return try {
+        DatagramSocket().use { socket ->
+            socket.soTimeout = timeout
+            val dataString = "$sessionId,$seq"
+            val sendData = dataString.toByteArray(Charsets.UTF_8)
+            val packet = DatagramPacket(sendData, sendData.size, InetAddress.getByName(host), port)
+            val sendTime = System.currentTimeMillis()
+            socket.send(packet)
+
+            val buffer = ByteArray(1024)
+            val response = DatagramPacket(buffer, buffer.size)
+            socket.receive(response)
+            System.currentTimeMillis() - sendTime
+        }
+    } catch (e: SocketTimeoutException) {
+        null
+    } catch (e: IOException) {
+        null
     }
 }

@@ -119,7 +119,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
             // Provide location callback to api service
             apiService?.setLocationCallback { getCurrentLocationString() }
 
+            isApiServiceBound = true
             updateUI()
+
+            // Auto-connect to server once the API service is ready
+            connectToServerAndStartHeartbeat()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -161,6 +165,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
         requestAllPermissions()
 
         // Bind to both services
+        // Auto-connect will be triggered from apiServiceConnection.onServiceConnected()
         val pingServiceIntent = Intent(this, PingService::class.java)
         bindService(pingServiceIntent, pingServiceConnection, Context.BIND_AUTO_CREATE)
 
@@ -185,13 +190,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
         FileLogger.appendLog(logMessage)
 
         // Update UI
-        tvLog.append("$logMessage\n")
-        tvLog.layout?.let { layout ->
-            val scrollAmount = layout.getLineTop(tvLog.lineCount)
-            if (scrollAmount > tvLog.height) {
-                tvLog.scrollTo(0, scrollAmount - tvLog.height)
-            }
-        }
+        tvLog.text = "$logMessage\n${tvLog.text}"
+
     }
 
     // Load persistent logs from file on app start
@@ -372,15 +372,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
     // LocationListener methods
     override fun onLocationChanged(location: Location) {
-        // Only update if the new location is significantly better
-//        if (isBetterLocation(location, currentLocation)) {
-//            val previousLocation = currentLocation?.let { "%.6f,%.6f".format(it.latitude, it.longitude) } ?: "N/A"
         currentLocation = location
-//            val newLocationString = getCurrentLocationString()
-
-        // Log location change
-//            appendLog("Location updated: $newLocationString (was: $previousLocation)")
-//        }
     }
 
     override fun onProviderEnabled(provider: String) {
@@ -413,14 +405,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
                     is ApiResponse.Success -> {
                         Toast.makeText(this@MainActivity, "Connected to server successfully", Toast.LENGTH_SHORT).show()
 
-                        // Add connection info to existing logs (don't clear)
-                        appendLog("=======================================", addTimestamp = true)
-                        appendLog("Connected to server successfully", addTimestamp = true)
-                        appendLog("Location: $location", addTimestamp = true)
-//                        appendLog("Heartbeat: Every 5 minutes", addTimestamp = true)
-                        appendLog("Waiting for server instructions...", addTimestamp = true)
-                        appendLog("=======================================", addTimestamp = true)
-
+                        appendLog("=======================================\nConnected to server successfully\nLocation: $location\n=======================================", addTimestamp = false)
                         // Start service for server-controlled operations
                         pingService?.startServerControlledMode()
 
@@ -448,11 +433,7 @@ class MainActivity : AppCompatActivity(), LocationListener {
 
             // Stop service operations
             pingService?.stopServerControlledMode()
-
-            appendLog("=======================================", addTimestamp = true)
-            appendLog("Disconnected from server", addTimestamp = true)
-            appendLog("Heartbeat stopped", addTimestamp = true)
-            appendLog("=======================================", addTimestamp = true)
+            appendLog("=======================================\nDisconnected from server\n=======================================", addTimestamp = false)
             Toast.makeText(this@MainActivity, "Disconnected from server", Toast.LENGTH_SHORT).show()
             updateUI()
         }
@@ -511,10 +492,10 @@ class MainActivity : AppCompatActivity(), LocationListener {
     private fun handleServerInstruction(instruction: ServerInstruction) {
         if (instruction.sendPing) {
             tvServerInstructions.text = "Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s"
-            appendLog("Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s", addTimestamp = true)
+//            appendLog("Server instruction: Ping ${instruction.host} (${instruction.protocol}) for ${instruction.durationSeconds}s", addTimestamp = true)
+            appendLog("Server instruction Received", addTimestamp = true)
 
             // Execute ping as instructed by server
-//            appendLog("Line 522: MainActivity.kt")
             pingService?.executePingInstruction(
                 instruction.host,
                 instruction.protocol,
@@ -527,8 +508,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
                 getCurrentLocationString()
             )
         } else {
-            tvServerInstructions.text = "Server instruction: Wait for further instructions"
-            appendLog("Heartbeat sent - waiting for instructions", addTimestamp = true)
+            tvServerInstructions.text = "Heartbeat Sent: Waiting for further instructions"
+            appendLog("Heartbeat sent", addTimestamp = true)
         }
     }
 
@@ -569,6 +550,11 @@ class MainActivity : AppCompatActivity(), LocationListener {
     override fun onResume() {
         super.onResume()
         updateUI()
+
+        // Auto-reconnect if service is available but not connected
+        if (isApiServiceBound && apiService?.isConnected() == false) {
+            connectToServerAndStartHeartbeat()
+        }
     }
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -668,6 +654,8 @@ class MainActivity : AppCompatActivity(), LocationListener {
         val clearMessage = "[$timestamp] Logs cleared"
         FileLogger.appendLog(clearMessage)
         tvLog.text = clearMessage
+
+
     }
 
     private fun exportLogs() {

@@ -34,7 +34,7 @@ class ApiService : Service() {
         private const val SERVER_BASE_URL = Constants.SERVER_BASE_URL // Change for physical device
         private const val CONNECT_TIMEOUT = Constants.CONNECT_TIMEOUT
         private const val READ_TIMEOUT = Constants.READ_TIMEOUT
-        private const val HEARTBEAT_INTERVAL_MS = 2*60*1000L // 1 hr
+        private const val HEARTBEAT_INTERVAL_MS = Constants.HEARTBEAT_INTERVAL_MS// 1 hr
         private const val RECONNECT_INTERVAL_MS = Constants.RECONNECT_INTERVAL_MS // 1 min
         private const val MAX_FAILED_UPLOADS = Constants.MAX_FAILED_UPLOADS // Maximum number of failed uploads to store
         // Notification constants
@@ -313,15 +313,14 @@ class ApiService : Service() {
         udpListenerJob = serviceScope.launch(Dispatchers.IO) {
             if (startDelayMs > 0) delay(startDelayMs)
 
-            val ackBatch = mutableListOf<JSONObject>() // store all ACK metadata
-            var ackCount = 0 //  counter for total ACKs sent
+            val ackBatch = mutableListOf<JSONObject>()
+            var ackCount = 0
+            val receivedSeqs = mutableSetOf<Int>() // single set, one session at a time
 
             try {
                 udpListenerSocket = DatagramSocket(0)
                 udpListenerPort = udpListenerSocket?.localPort ?: 0
                 udpListenerSocket?.soTimeout = 0
-
-                log("UDP Listener started on port $udpListenerPort")
 
                 val serverAddress = InetSocketAddress("170.187.252.25", serverPort)
                 val sessionId = UUID.randomUUID().toString()
@@ -379,24 +378,31 @@ class ApiService : Service() {
                             val pingData = JSONObject(data)
                             val seq = pingData.optInt("sequence", -1)
 
-                            // Send ACK
+                            // Track received seq numbers and build bitstring
+                            if (seq > 0) receivedSeqs.add(seq)
+                            val bitstring = (1..500).map { i ->
+                                if (i in receivedSeqs) '1' else '0'
+                            }.joinToString("")
+
+                            // Send ACK with bitstring
                             val ack = JSONObject().apply {
                                 put("device_id", deviceId)
                                 put("client_id", clientId ?: "unknown")
                                 put("message", "ACK")
                                 put("sequence", seq)
+                                put("bitstring", bitstring)
                             }.toString().toByteArray()
 
                             udpListenerSocket?.send(DatagramPacket(ack, ack.size, senderAddress))
 
-                            ackCount++ //  increment ACK count
-                            if (ackCount % 10 == 0) { // print every 10 ACKs, adjust as needed
+                            ackCount++
+                            if (ackCount % 10 == 0) {
                                 Log.i(TAG, "Total ACKs sent so far: $ackCount")
                             }
 
                             // Store metadata for later upload
                             val ackMeta = JSONObject().apply {
-                                put("session_id", pingData.optString("session_id", sessionId))
+                                put("session_id", sessionId)
                                 put("client_id", clientId ?: "unknown")
                                 put("timestamp", System.currentTimeMillis())
                                 put("sequence_number", seq)
@@ -418,18 +424,14 @@ class ApiService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "UDP Listener failed: ${e.message}", e)
             } finally {
-                // --- Upload batch once at the end ---
                 if (ackBatch.isNotEmpty()) {
                     uploadAckBatchOnce(ackBatch)
                 }
-
-                log("UDP Listener stopped - total ACKs sent: $ackCount") //  final count
                 udpListenerSocket?.close()
                 udpListenerSocket = null
                 udpListenerPort = 0
             }
         }
-
     }
 
 
@@ -493,7 +495,7 @@ class ApiService : Service() {
                     lastLocation = currentLocation
 
                     Log.i(TAG, "Connected to server with client_id: $clientId")
-                    statusCallback?.invoke("connected", "Connected to server successfully")
+                    //statusCallback?.invoke("connected", "Connected to server successfully")
                     try { startForeground(ONGOING_NOTIFICATION_ID, createOngoingNotification()) } catch (_: Exception) {}
 
                     return@withContext ApiResponse.Success(responseJson)
@@ -533,7 +535,7 @@ class ApiService : Service() {
                     isInReconnectMode = false
                     clientId = null
 
-                    statusCallback?.invoke("disconnected", "Disconnected from server")
+                    //statusCallback?.invoke("disconnected", "Disconnected from server")
 
                     // Stop foreground service
                     stopForeground(true)
@@ -670,7 +672,7 @@ class ApiService : Service() {
         lastLocation = location
         isHeartbeatActive = true
         Log.i(TAG, "Starting heartbeat/reconnect system at ${dateFormat.format(Date())}")
-        statusCallback?.invoke("heartbeat_started", "Heartbeat/reconnect system started")
+       // statusCallback?.invoke("heartbeat_started", "Heartbeat/reconnect system started")
 
         updateOngoingNotification()
 
@@ -749,7 +751,7 @@ class ApiService : Service() {
         heartbeatJob = null
 
         if (wasActive) {
-            statusCallback?.invoke("heartbeat_stopped", "Heartbeat/reconnect system stopped")
+            //statusCallback?.invoke("heartbeat_stopped", "Heartbeat/reconnect system stopped")
             updateOngoingNotification()
             Log.i(TAG, "Heartbeat/reconnect system stopped successfully")
         }
@@ -874,6 +876,7 @@ class ApiService : Service() {
                     val responseJson = JSONObject(response)
                     if (responseJson.optBoolean("send_ping", false)) {
                         val delayMs = responseJson.optLong("delay_ms", 0)
+                        log("Heartbeat sent successfully")
                         Log.i(TAG, "Server instruction in heartbeat: Ping ${responseJson.optString("ping_host")} (${responseJson.optString("ping_protocol")}) with ${delayMs}ms delay")
                     } else {
                         Log.d(TAG, "Heartbeat response: No server instructions")
@@ -932,6 +935,9 @@ class ApiService : Service() {
                     put("duration_seconds", sessionData.durationSeconds)
                     put("packets_sent", sessionData.packetsSent)
                     put("packets_received", sessionData.packetsReceived)
+                    put("packet_loss_percent", sessionData.packetLossPercent)
+                    put("ack_loss_percent", sessionData.ackLossPercent)
+                    put("data_loss_percent", sessionData.dataLossPercent)
 //                    put("packet_loss_percent", sessionData.packetLossPercent)
 //                    put("avg_rtt_ms", sessionData.avgRttMs)
 //                    put("min_rtt_ms", sessionData.minRttMs)
@@ -1034,13 +1040,6 @@ class ApiService : Service() {
                     conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "Unknown error"
                 }
                 conn.disconnect()
-
-                if (code == HttpURLConnection.HTTP_OK) {
-                    log("Uploaded ${ackBatch.size} ACK records successfully at end")
-                } else {
-                    log("Failed to upload ACK batch ($code): $response - queued for retry")
-                    addAckBatchToRetry(ackBatch)
-                }
             } catch (e: Exception) {
                 log("Exception uploading ACK batch: ${e.message}")
                 addAckBatchToRetry(ackBatch)
@@ -1052,18 +1051,18 @@ class ApiService : Service() {
 
         if (failedAckBatchQueue.size >= 100) {
             failedAckBatchQueue.poll() // prevent unlimited growth
-            log("ACK retry queue full - dropping oldest batch")
+            //log("ACK retry queue full - dropping oldest batch")
         }
 
         failedAckBatchQueue.offer(batch)
-        log("Queued failed ACK batch (${batch.size} records) for retry")
+        //log("Queued failed ACK batch (${batch.size} records) for retry")
     }
 
     private suspend fun retryFailedAckBatches() {
         if (failedAckBatchQueue.isEmpty()) return
 
         val total = failedAckBatchQueue.size
-        log("Retrying $total failed ACK batches")
+        //log("Retrying $total failed ACK batches")
 
         val retryList = mutableListOf<List<JSONObject>>()
 
@@ -1079,20 +1078,20 @@ class ApiService : Service() {
                 conn.disconnect()
 
                 if (code == HttpURLConnection.HTTP_OK) {
-                    log("Reuploaded ACK batch (${batch.size} records)")
+                   // log("Reuploaded ACK batch (${batch.size} records)")
                 } else {
-                    log("ACK batch reupload failed ($code) - will retry later")
+                   // log("ACK batch reupload failed ($code) - will retry later")
                     retryList.add(batch)
                 }
             } catch (e: Exception) {
-                log("Exception retrying ACK batch: ${e.message}")
+               // log("Exception retrying ACK batch: ${e.message}")
                 retryList.add(batch)
             }
         }
 
         retryList.forEach { failedAckBatchQueue.offer(it) }
 
-        log("ACK batch retry complete - ${failedAckBatchQueue.size} remaining")
+        //log("ACK batch retry complete - ${failedAckBatchQueue.size} remaining")
     }
 
 
@@ -1202,6 +1201,8 @@ data class PingSessionData(
     val packetsSent: Int,
     val packetsReceived: Int,
     val packetLossPercent: Double,
+    val ackLossPercent: Double = 0.0,
+    val dataLossPercent: Double = 0.0,
     val avgRttMs: Double = 0.0,
     val minRttMs: Double = 0.0,
     val maxRttMs: Double = 0.0,
