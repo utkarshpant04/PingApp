@@ -2,32 +2,48 @@
 """
 Simple UDP Listener Server
 Listens for UDP packets, logs them to a database using millisecond timestamps,
-and responds back with the matched sequence number.
+and responds back with the matched sequence number + a 500-bit ACK bitstring.
 """
 
 import socket
 import sqlite3
-import time  # Use time module for epoch timestamps
+import time
+import yaml
 
-# --- Database Configuration ---
-DB_NAME = "ping_data2.db"
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+config = load_config()
+
+DB_NAME = config["database"]
 TABLE_NAME = "ack_session_server"
-# ------------------------------
+
+# In-memory store: session_id -> set of acked seq_nums
+session_ack_bits = {}
 
 def get_current_time_ms():
     """Returns the current time in milliseconds since the epoch."""
     return int(time.time() * 1000)
 
+def build_bitstring(session_id, seq_num, length=500):
+    """
+    Returns a bitstring of `length` chars.
+    Position i is '1' if seq i has been ACKed for this session, else '0'.
+    seq_num is 1-indexed; position 0 in string = seq 1.
+    """
+    if session_id not in session_ack_bits:
+        session_ack_bits[session_id] = set()
+    session_ack_bits[session_id].add(seq_num)
+
+    bits = []
+    for i in range(1, length + 1):
+        bits.append('1' if i in session_ack_bits[session_id] else '0')
+    return ''.join(bits)
+
 def setup_database():
-    """
-    Connects to the SQLite DB and creates the ack_session_server table
-    if it doesn't already exist.
-    """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
-    # --- Schema Changed Here ---
-    # Changed timestamp fields from TEXT to INTEGER to store milliseconds
     create_table_query = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         timestamp INTEGER,
@@ -43,36 +59,28 @@ def setup_database():
     return conn
 
 def run_udp_server(conn, host="0.0.0.0", port=50002):
-    """
-    Runs the main UDP server loop.
-    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((host, port))
     print(f"UDP server listening on {host}:{port}")
 
     while True:
         try:
-            # 1. Receive data
-            data, addr = sock.recvfrom(1024) # buffer size 1024 bytes
-
-            # --- Timestamp Changed Here ---
+            data, addr = sock.recvfrom(1024)
             time_received_ms = get_current_time_ms()
-            # -----------------------------
-
             msg = data.decode(errors='ignore')
             print(f"Received from {addr}: {msg}")
 
             session_id = None
             seq_num = None
-            reply = "ACK: INVALID_FORMAT" # Default reply
+            reply = "ACK: INVALID_FORMAT"
 
-            # 2. Parse the new "session_id,seq" format
             try:
                 parts = msg.split(',')
                 if len(parts) == 2:
                     session_id = parts[0]
-                    seq_num = int(parts[1]) # Can raise ValueError
-                    reply = f"ACK {seq_num}" # Prepare a valid reply
+                    seq_num = int(parts[1])
+                    bitstring = build_bitstring(session_id, seq_num)
+                    reply = f"ACK {seq_num} {bitstring}"
                 else:
                     print("Error: Invalid message format. Expected 'session_id,seq'.")
             except ValueError:
@@ -80,16 +88,11 @@ def run_udp_server(conn, host="0.0.0.0", port=50002):
             except Exception as e:
                 print(f"Error parsing message: {e}")
 
-            # --- Timestamp Changed Here ---
-            # Capture 'time_sent' right before sending
             time_sent_ms = get_current_time_ms()
-            # -----------------------------
 
-            # 3. Send reply
-            print(f"Sending reply to {addr}: {reply}")
+            print(f"Sending reply to {addr}: ACK {seq_num} <bitstring>")
             sock.sendto(reply.encode(), addr)
 
-            # 4. Log to database (if parsing was successful)
             if session_id is not None and seq_num is not None:
                 try:
                     cursor = conn.cursor()
@@ -97,12 +100,7 @@ def run_udp_server(conn, host="0.0.0.0", port=50002):
                     INSERT INTO {TABLE_NAME} (timestamp, seq_num, time_received, time_sent, session_id)
                     VALUES (?, ?, ?, ?, ?)
                     """
-
-                    # --- DB Data Changed Here ---
-                    # We use time_received_ms for both 'timestamp' and 'time_received' columns
                     db_data = (time_received_ms, seq_num, time_received_ms, time_sent_ms, session_id)
-                    # -----------------------------
-
                     cursor.execute(insert_query, db_data)
                     conn.commit()
                     print(f"Logged to DB: (Session: {session_id}, Seq: {seq_num})")
@@ -115,7 +113,6 @@ def run_udp_server(conn, host="0.0.0.0", port=50002):
 if __name__ == "__main__":
     try:
         db_conn = setup_database()
-        # Run the server on port 50002 to match the app
         run_udp_server(db_conn, port=50002)
     except Exception as e:
         print(f"Failed to start server: {e}")

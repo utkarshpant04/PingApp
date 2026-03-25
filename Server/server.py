@@ -14,15 +14,25 @@ import threading
 import random
 import numpy as np
 import ssl
+import yaml
 
-def get_instruction_delay(average_seconds=30.0*60):
-    delay_seconds = np.random.exponential(scale=average_seconds)  # Average 30 minutes
-    return min(delay_seconds*1000, 3600*999)  # Convert to milliseconds
+def get_instruction_delay(average_seconds=15.0*60):
+    delay_seconds = np.random.exponential(scale=average_seconds)
+    return 10000  # Average 30 minutes
+    return min(delay_seconds*1000, 900*999)  # Convert to milliseconds
 
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        return yaml.safe_load(f)
+
+config = load_config()
+
+DB_NAME = config['database']
 
 class PingDataServer:
     def __init__(self, db_path="ping_data.db"):
@@ -32,8 +42,8 @@ class PingDataServer:
         self.init_database()
 
     def load_default_ping_instructions(self):
-        return [
-            {"host": "170.187.252.25", "protocol": "UDP", "duration_seconds": 15, "interval_ms": 50, "delay_ms": 5000},
+       return [
+            {"host": "170.187.252.25", "protocol": "UDP", "duration_seconds": 15, "interval_ms": 30, "delay_ms": 5000},
         ]
 
     def init_database(self):
@@ -57,7 +67,7 @@ class PingDataServer:
                 )
             ''')
 
-            # Table for ping sessions
+                        # Table for ping sessions
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ping_sessions (
                     session_id TEXT PRIMARY KEY,
@@ -69,6 +79,9 @@ class PingDataServer:
                     duration_seconds INTEGER,
                     packets_sent INTEGER,
                     packets_received INTEGER,
+                    packet_loss_percent REAL DEFAULT 0.0,
+                    ack_loss_percent REAL DEFAULT 0.0,
+                    data_loss_percent REAL DEFAULT 0.0,
                     total_bytes BIGINT,
                     avg_bandwidth_bps REAL,
                     start_location TEXT,
@@ -245,18 +258,26 @@ class PingDataServer:
                 cursor.execute('''
                     INSERT or REPLACE INTO ping_sessions
                     (session_id, client_id, host, protocol, start_time, end_time,
-                     duration_seconds, packets_sent, packets_received, total_bytes, avg_bandwidth_bps,
-                     start_location, end_location, settings_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration_seconds, packets_sent, packets_received, packet_loss_percent,
+                    ack_loss_percent, data_loss_percent, total_bytes, avg_bandwidth_bps,
+                    start_location, end_location, settings_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     session_data['session_id'], session_data['client_id'], session_data['host'],
                     session_data['protocol'], session_data['start_time'], session_data['end_time'],
                     session_data['duration_seconds'], session_data['packets_sent'],
-                    session_data['packets_received'], session_data.get('total_bytes', 0),
-                    session_data.get('avg_bandwidth_bps', 0), session_data.get('start_location', 'N/A'),
-                    session_data.get('end_location', 'N/A'), json.dumps(session_data.get('settings', {}))
+                    session_data['packets_received'],
+                    session_data.get('packet_loss_percent', 0.0),
+                    session_data.get('ack_loss_percent', 0.0),
+                    session_data.get('data_loss_percent', 0.0),
+                    session_data.get('total_bytes', 0),
+                    session_data.get('avg_bandwidth_bps', 0),
+                    session_data.get('start_location', 'N/A'),
+                    session_data.get('end_location', 'N/A'),
+                    json.dumps(session_data.get('settings', {}))
                 ))
-                #firewall  based notification
+
+                #firewall based notification
                 # poisson
                 # Update client session count
                 cursor.execute('''
@@ -488,6 +509,7 @@ class PingRestApiHandler(BaseHTTPRequestHandler):
         self.send_json_response(200, ping_response)
         logger.info(f"Ping test from {self.client_address[0]}")
 
+
     def handle_connect(self):
         """Handle device connection with registration"""
         try:
@@ -700,7 +722,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Simple Ping REST API Server')
     parser.add_argument('--port', type=int, default=12345, help='Server port (default: 8080)')
-    parser.add_argument('--db', type=str, default='ping_data2.db', help='Database file path')
+    parser.add_argument('--db', type=str, default=DB_NAME, help='Database file path')
     args = parser.parse_args()
 
     db = PingDataServer(args.db)
